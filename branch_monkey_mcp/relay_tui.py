@@ -92,6 +92,8 @@ class RelayTUI:
             "onboarding_needed": False,
             "registered": None,  # None=pending, True=ok, str=error
             "stream_bridge": None,  # None=not started, True=connected, False=disconnected, str=error
+            "launchd": None,  # None=unknown, "running", "installed", "not_installed", "error"
+            "launchd_prompt": None,  # None=don't show, "pending"=showing, "done"=answered
         }
         self._stdout_capture = LogCapture(sys.stdout)
         self._stderr_capture = LogCapture(sys.stderr)
@@ -110,6 +112,8 @@ class RelayTUI:
         self._onboarding_cursor = 0
         self._on_home_set = None  # Callback when home dir is confirmed
         self._on_logout = None  # Callback when user logs out
+        self._on_launchd_install = None  # Callback when user chooses launchd option
+        self._launchd_selected = 0  # 0=Yes, 1=No for the prompt menu
         self._verbose = False
 
     def install_capture(self):
@@ -209,6 +213,11 @@ class RelayTUI:
         s = self.state
         if s.get("onboarding_needed") and s["auth_state"] not in ("authenticating", "waiting"):
             self._handle_onboarding_key(key, stdscr)
+            return
+
+        # Launchd prompt mode
+        if s.get("launchd_prompt") == "pending":
+            self._handle_launchd_prompt_key(key)
             return
 
         # Home directory editing mode
@@ -345,6 +354,11 @@ class RelayTUI:
         # Onboarding screen (first run, after auth)
         if s.get("onboarding_needed"):
             self._draw_onboarding(stdscr, y, col, bar_w)
+            return
+
+        # Launchd install prompt (after onboarding)
+        if s.get("launchd_prompt") == "pending":
+            self._draw_launchd_prompt(stdscr, y, col, bar_w)
             return
 
         # Account info
@@ -499,6 +513,27 @@ class RelayTUI:
         if self._verbose:
             self._put(stdscr, y, val_col, "Keeps connection alive, detects drops", self._dim())
             y += 1
+
+        # Startup (launchd)
+        ld = s.get("launchd")
+        if ld is not None:
+            self._put(stdscr, y, lbl_col, "Startup", self._dim())
+            if ld == "running":
+                self._put(stdscr, y, val_col, "\u25cf", self._green() | self._bold())
+                self._put(stdscr, y, val_col + 2, "Enabled")
+            elif ld == "installed":
+                self._put(stdscr, y, val_col, "\u25cf", self._yellow() | self._bold())
+                self._put(stdscr, y, val_col + 2, "Installed (not running)")
+            elif ld == "error":
+                self._put(stdscr, y, val_col, "\u25cf", self._red() | self._bold())
+                self._put(stdscr, y, val_col + 2, "Error")
+            else:
+                self._put(stdscr, y, val_col, "\u25cf", self._dim())
+                self._put(stdscr, y, val_col + 2, "Not installed")
+            y += 1
+            if self._verbose:
+                self._put(stdscr, y, val_col, "Auto-start on login via launchd", self._dim())
+                y += 1
         y += 1
 
         # Stats
@@ -682,6 +717,53 @@ class RelayTUI:
         x = lbl_col
         self._put(stdscr, y, x, "[Enter]", self._cyan() | self._bold())
         self._put(stdscr, y, x + 8, "Continue", self._dim())
+
+    def _handle_launchd_prompt_key(self, key):
+        """Handle keyboard input during launchd prompt."""
+        if key in (curses.KEY_UP, ord("k")):
+            self._launchd_selected = max(0, self._launchd_selected - 1)
+        elif key in (curses.KEY_DOWN, ord("j")):
+            self._launchd_selected = min(1, self._launchd_selected + 1)
+        elif key in (curses.KEY_ENTER, 10, 13):
+            if self._on_launchd_install:
+                self._on_launchd_install(self._launchd_selected == 0)
+            else:
+                self.state["launchd_prompt"] = "done"
+        elif key == ord("1"):
+            self._launchd_selected = 0
+        elif key == ord("2"):
+            self._launchd_selected = 1
+
+    def _draw_launchd_prompt(self, stdscr, y, col, bar_w):
+        """Draw the launchd install prompt screen."""
+        lbl_col = col + 2
+
+        self._put(stdscr, y, lbl_col, "Run on startup?", self._bold())
+        y += 2
+        self._put(stdscr, y, lbl_col, "The relay can auto-start when you log in", self._dim())
+        y += 1
+        self._put(stdscr, y, lbl_col, "and restart automatically if it crashes.", self._dim())
+        y += 2
+
+        options = ["Yes (recommended)", "No, just run manually"]
+        for i, opt in enumerate(options):
+            if i == self._launchd_selected:
+                self._put(stdscr, y, lbl_col, f"  \u25b8 {i+1}.", self._cyan() | self._bold())
+                self._put(stdscr, y, lbl_col + 7, opt, self._cyan() | self._bold())
+            else:
+                self._put(stdscr, y, lbl_col + 4, f"{i+1}.", self._dim())
+                self._put(stdscr, y, lbl_col + 7, opt)
+            y += 1
+        y += 1
+
+        self._hline(stdscr, y, col, bar_w)
+        y += 1
+        x = lbl_col
+        self._put(stdscr, y, x, "[\u2191\u2193]", self._cyan() | self._bold())
+        self._put(stdscr, y, x + 5, "Select", self._dim())
+        x += 14
+        self._put(stdscr, y, x, "[Enter]", self._cyan() | self._bold())
+        self._put(stdscr, y, x + 8, "Confirm", self._dim())
 
     def _draw_auth(self, stdscr, y, col, bar_w):
         s = self.state
