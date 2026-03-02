@@ -335,6 +335,7 @@ def monkey_task_complete(
             output += f"\n\n⚠️ PR: {pr_output}"
 
         # Auto-create and link context if project is focused
+        context_id = None
         if state.CURRENT_PROJECT_ID and task_uuid:
             try:
                 # Build context content
@@ -372,12 +373,19 @@ def monkey_task_complete(
             if github_pr_url:
                 notif_message += f"\nPR: {github_pr_url}"
 
+            # Link to the generated context if available, otherwise PR
+            notif_link = None
+            if context_id:
+                notif_link = f"/context?id={context_id}"
+            elif github_pr_url:
+                notif_link = github_pr_url
+
             api_post("/api/notifications", {
                 "project_id": state.CURRENT_PROJECT_ID,
                 "type": "success",
                 "title": notif_title,
                 "message": notif_message,
-                "link": github_pr_url or None
+                "link": notif_link
             })
         except Exception:
             pass  # Non-critical
