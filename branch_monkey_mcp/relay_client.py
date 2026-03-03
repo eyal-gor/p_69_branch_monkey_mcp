@@ -4,15 +4,18 @@ Relay Client for Kompany Cloud
 This module allows a local machine to connect to Kompany Cloud
 and receive relayed requests from the web UI.
 
-VERSION: 4
+VERSION: 5
 
 The client:
 1. Authenticates using device auth flow (if no cached token)
-2. Gets connection config from cloud (Supabase URL, key, etc.)
-3. Connects to Supabase Realtime channel
+2. Gets connection config from cloud (stream bridge URL, etc.)
+3. Connects to Cloudflare Durable Object via WebSocket
 4. Registers as a compute node
 5. Receives requests and executes them locally
-6. Streams responses back through the channel
+6. Streams responses back through the DO WebSocket
+
+All communication (request/response AND streaming) flows through
+the Cloudflare DO WebSocket. Database access uses Supabase PostgREST.
 
 Features:
 - Auto-reconnect with exponential backoff on connection loss
@@ -60,7 +63,7 @@ class ConnectionState(Enum):
     RECONNECTING = "reconnecting"
 
 # Version
-VERSION = "4"
+VERSION = "5"
 
 # Config file location
 CONFIG_DIR = Path.home() / ".kompany"
@@ -122,12 +125,16 @@ DEFAULT_CLOUD_URL = FALLBACK_CLOUD_URL
 class RelayClient:
     """
     Relay client that connects local machine to Kompany Cloud
-    using Supabase Realtime.
+    using Cloudflare Durable Object WebSocket.
+
+    All communication (request/response relay AND streaming) flows through
+    the DO WebSocket. Database access uses Supabase PostgREST (unchanged).
 
     Handles:
     - Device authentication flow
-    - Supabase Realtime connection
+    - DO WebSocket connection (sole transport)
     - Request/response relay
+    - Agent output streaming
     - Auto-reconnection with exponential backoff
     - Health monitoring
     - Compute node registration
@@ -155,13 +162,9 @@ class RelayClient:
         # Relay config (from cloud)
         self.relay_config: Optional[Dict[str, Any]] = None
 
-        # Supabase client
-        self.supabase = None
-        self.channel = None
-
         self._running = False
 
-        # Stream bridge (Cloudflare DO) for direct streaming
+        # Cloudflare DO WebSocket (sole transport for all relay communication)
         self._do_ws: Optional[websockets.WebSocketClientProtocol] = None
         self._do_ws_task: Optional[asyncio.Task] = None
         self._do_ws_reconnect = True
@@ -171,8 +174,6 @@ class RelayClient:
         self.connection_state = ConnectionState.DISCONNECTED
         self.reconnect_attempts = 0
         self.last_successful_heartbeat: Optional[datetime] = None
-        self.last_channel_activity: Optional[datetime] = None
-        self._channel_liveness_failures = 0
         self.should_reconnect = True  # False when explicitly disconnected
         self._reconnect_task: Optional[asyncio.Task] = None
         self._health_check_task: Optional[asyncio.Task] = None
@@ -308,57 +309,6 @@ class RelayClient:
                 except Exception:
                     pass  # /api/me may not exist yet
 
-    async def _fetch_account_info_supabase(self):
-        """Fetch user/org info directly from Supabase after connecting."""
-        if not self.supabase:
-            return
-
-        try:
-            # Get user email from device_codes table
-            if self.user_id and not self.user_email:
-                result = await self.supabase.table("device_codes").select(
-                    "user_id"
-                ).eq("access_token", self.access_token).eq(
-                    "status", "approved"
-                ).limit(1).execute()
-                # device_codes has user_id but not email; try auth admin
-                # Fall back: check if compute_nodes has email-like data
-                pass
-
-            # Get org name from organizations table
-            if not self.org_name:
-                result = await self.supabase.table("organizations").select(
-                    "id, name"
-                ).execute()
-                orgs = result.data or []
-                if self.org_id:
-                    for org in orgs:
-                        if str(org.get("id")) == str(self.org_id):
-                            self.org_name = org.get("name")
-                            break
-                if not self.org_name and len(orgs) >= 1:
-                    self.org_name = orgs[0].get("name")
-                    if not self.org_id:
-                        self.org_id = str(orgs[0].get("id"))
-
-            if self.org_name or self.user_email:
-                self._tui_update(user_email=self.user_email, org_name=self.org_name)
-                # Update cached token
-                self._save_token({
-                    "access_token": self.access_token,
-                    "user_id": self.user_id,
-                    "org_id": self.org_id,
-                    "user_email": self.user_email,
-                    "org_name": self.org_name,
-                    "relay_config": self.relay_config,
-                })
-                if self.org_name:
-                    print(f"[Relay] Organization: {self.org_name}")
-                if self.user_email:
-                    print(f"[Relay] User: {self.user_email}")
-        except Exception as e:
-            print(f"[Relay] Could not fetch account info from Supabase: {e}")
-
     async def authenticate(self) -> bool:
         """
         Authenticate with the cloud using device auth flow.
@@ -489,32 +439,16 @@ class RelayClient:
             self._tui_update(auth_state="failed")
             return False
 
-    async def _connect_channel(self) -> bool:
+    async def _connect_do(self) -> bool:
         """
-        Internal method to establish Supabase Realtime connection.
+        Establish the Cloudflare DO WebSocket connection.
+        This is the sole transport for all relay communication.
         Returns True if successful, False otherwise.
         """
-        # Import supabase here to avoid import errors if not installed
-        try:
-            from supabase import acreate_client, AsyncClient
-            from supabase.lib.client_options import AsyncClientOptions
-        except ImportError:
-            print("[Relay] Error: supabase library not installed")
-            print("[Relay] Install with: pip install supabase")
-            return False
-
-        supabase_url = self.relay_config.get("supabase_url")
-        supabase_key = self.relay_config.get("supabase_key")
-        channel_prefix = self.relay_config.get("channel_prefix", "relay")
-
-        if not supabase_url or not supabase_key:
-            print("[Relay] Error: Missing Supabase config")
-            return False
-
         self.connection_state = ConnectionState.CONNECTING
         self._tui_update(connection="connecting")
 
-        print(f"\n[Relay] Connecting to Supabase Realtime...")
+        print(f"\n[Relay] Connecting to stream bridge...")
         if self.user_email:
             print(f"[Relay] User: {self.user_email}")
         if self.org_name:
@@ -523,42 +457,13 @@ class RelayClient:
         print(f"[Relay] Local port: {self.local_port}")
 
         try:
-            # Create Supabase client with higher realtime retries for long-running relay
-            options = AsyncClientOptions(
-                realtime={"max_retries": 50, "initial_backoff": 1.0}
-            )
-            self.supabase = await acreate_client(supabase_url, supabase_key, options)
+            await self._connect_stream_bridge()
 
-            # Channel name for this machine
-            channel_name = f"{channel_prefix}:{self.user_id}:{self.machine_id}"
-
-            # Subscribe to channel
-            self.channel = self.supabase.channel(channel_name)
-
-            # Handle incoming messages
-            def on_request(payload):
-                self._create_tracked_task(self._handle_message(payload))
-
-            def on_disconnect(payload):
-                print(f"\n[Relay] Received disconnect command from cloud")
-                self._create_tracked_task(self._shutdown())
-
-            self.channel.on_broadcast("request", on_request)
-            self.channel.on_broadcast("stream_request", on_request)
-            self.channel.on_broadcast("stream_start", on_request)
-            self.channel.on_broadcast("ping", lambda _: self._send_pong())
-            self.channel.on_broadcast("disconnect", on_disconnect)
-
-            # Subscribe (returns channel object, throws on error)
-            await self.channel.subscribe()
-
-            print(f"\n[Relay] Connected to Supabase Realtime!")
-            print(f"[Relay] Channel: {channel_name}")
-            print(f"[Relay] Ready to receive requests from cloud\n")
-
-            # Fetch account info via Supabase if not already known
-            if not self.user_email or not self.org_name:
-                await self._fetch_account_info_supabase()
+            if not self._do_ws:
+                print("[Relay] Failed to establish DO WebSocket connection")
+                self.connection_state = ConnectionState.DISCONNECTED
+                self._tui_update(connection="disconnected")
+                return False
 
             # Register this machine
             await self._register_machine()
@@ -570,14 +475,12 @@ class RelayClient:
             self.connection_state = ConnectionState.CONNECTED
             self.reconnect_attempts = 0
             self.last_successful_heartbeat = datetime.utcnow()
-            self.last_channel_activity = datetime.utcnow()
-            self._channel_liveness_failures = 0
             self._tui_update(connection="connected", connected_at=datetime.now(timezone.utc))
 
-            connection_logger.log("connected", detail=f"Channel {channel_name}")
+            connection_logger.log("connected", detail=f"DO bridge {self.stream_bridge_url}")
 
-            # Connect to stream bridge (DO) for direct streaming
-            await self._connect_stream_bridge()
+            print(f"\n[Relay] Connected to stream bridge!")
+            print(f"[Relay] Ready to receive requests from cloud\n")
 
             return True
 
@@ -588,9 +491,8 @@ class RelayClient:
             connection_logger.log("connection_failed", error=str(e))
             return False
 
-    async def _disconnect_channel(self):
-        """Disconnect from Supabase Realtime channel and stream bridge."""
-        # Close DO stream bridge
+    async def _disconnect_do(self):
+        """Disconnect from the DO WebSocket."""
         self._do_ws_reconnect = False
         if self._do_ws_task and not self._do_ws_task.done():
             self._do_ws_task.cancel()
@@ -609,26 +511,10 @@ class RelayClient:
                 task.cancel()
         self._background_tasks.clear()
 
-        try:
-            if self.channel and self.supabase:
-                await self.supabase.remove_channel(self.channel)
-                self.channel = None
-
-            # Close the Supabase realtime client to stop its internal tasks
-            if self.supabase:
-                try:
-                    await self.supabase.realtime.close()
-                except Exception:
-                    pass
-                self.supabase = None
-
-            self.connection_state = ConnectionState.DISCONNECTED
-            self._channel_liveness_failures = 0
-            self._tui_update(connection="disconnected")
-            connection_logger.log("disconnected", detail="Channel removed")
-            print("[Relay] Disconnected from channel")
-        except Exception as e:
-            print(f"[Relay] Error during disconnect: {e}")
+        self.connection_state = ConnectionState.DISCONNECTED
+        self._tui_update(connection="disconnected")
+        connection_logger.log("disconnected", detail="DO WebSocket closed")
+        print("[Relay] Disconnected")
 
     async def _connect_stream_bridge(self):
         """Connect to Cloudflare DO stream bridge for direct streaming."""
@@ -664,7 +550,7 @@ class RelayClient:
             self._tui_update(stream_bridge=str(e)[:60])
 
     async def _do_ws_listen(self):
-        """Listen for messages from the DO stream bridge (browser → relay)."""
+        """Listen for messages from the DO stream bridge (browser → relay, cloud → relay)."""
         try:
             async for raw in self._do_ws:
                 try:
@@ -677,6 +563,12 @@ class RelayClient:
                     self._create_tracked_task(self._handle_stream_start(data, via_do=True))
                 elif msg_type == "stream_stop":
                     print(f"[Relay] Stream stop via DO: stream_id={data.get('stream_id')}")
+                elif msg_type == "request":
+                    # HTTP request relayed from cloud via DO
+                    self._create_tracked_task(self._handle_do_request(data))
+                elif msg_type == "disconnect":
+                    print(f"\n[Relay] Received disconnect command via DO bridge")
+                    self._create_tracked_task(self._shutdown())
                 elif msg_type == "ping":
                     try:
                         await self._do_ws.send(json.dumps({"type": "pong"}))
@@ -692,34 +584,48 @@ class RelayClient:
             connection_logger.log("stream_bridge_error", error=str(e))
         finally:
             self._do_ws = None
-            self._tui_update(stream_bridge=False)
-            # Auto-reconnect if still running
-            if self._do_ws_reconnect and self._running and self.connection_state == ConnectionState.CONNECTED:
-                self._create_tracked_task(self._reconnect_stream_bridge())
+            self._tui_update(stream_bridge=False, connection="disconnected")
+            # DO WebSocket is the sole transport — disconnection means full reconnect
+            if self._do_ws_reconnect and self._running:
+                self.connection_state = ConnectionState.DISCONNECTED
+                await self._trigger_reconnect()
 
-    async def _reconnect_stream_bridge(self):
-        """Reconnect to the stream bridge with exponential backoff (5-60s)."""
-        delay = min(5 * (2 ** self._do_reconnect_attempts), 60)
-        jitter = delay * 0.2 * random.random()
-        self._do_reconnect_attempts += 1
-        total_delay = delay + jitter
+    async def _handle_do_request(self, data: Dict[str, Any]):
+        """Handle an HTTP request relayed from cloud via the DO WebSocket.
 
-        print(f"[Relay] Reconnecting to stream bridge in {total_delay:.1f}s (attempt {self._do_reconnect_attempts})...")
-        await asyncio.sleep(total_delay)
+        Executes the request on the local server and sends the response
+        back through the DO WebSocket so the DO can return it as an HTTP response.
+        """
+        request_id = data.get("id")
+        method = data.get("method", "GET")
+        path = data.get("path", "/")
 
-        if self._running and self._do_ws_reconnect and self.connection_state == ConnectionState.CONNECTED:
-            await self._connect_stream_bridge()
+        self._request_count += 1
+        self._tui_update(requests_handled=self._request_count)
+        print(f"[Relay] DO request: {method} {path} (id={request_id})")
+
+        response = await self._execute_local_request(data)
+
+        # Send response back via DO WebSocket
+        try:
+            if self._do_ws:
+                await self._do_ws.send(json.dumps(response))
+                print(f"[Relay] DO response sent: status={response.get('status')} (id={request_id})")
+            else:
+                print(f"[Relay] Cannot send DO response — WebSocket disconnected (id={request_id})")
+        except Exception as e:
+            print(f"[Relay] Failed to send DO response: {e}")
+            connection_logger.log("do_response_failed", error=str(e), detail=f"id={request_id}")
 
     async def _send_stream_data(self, use_do: bool, data: dict):
-        """Send stream data via DO WebSocket or Supabase broadcast."""
+        """Send stream data via DO WebSocket."""
         try:
-            if use_do and self._do_ws:
+            if self._do_ws:
                 await self._do_ws.send(json.dumps(data))
-            elif self.channel:
-                await self.channel.send_broadcast("stream_event", data)
-                self.last_channel_activity = datetime.utcnow()
+            else:
+                raise ConnectionError("DO WebSocket not connected")
         except Exception as e:
-            connection_logger.log("channel_send_failed", error=str(e), detail="stream_event")
+            connection_logger.log("stream_send_failed", error=str(e), detail="stream_event")
             raise  # Re-raise so callers can handle stream failures
 
     async def _reconnect(self):
@@ -754,10 +660,10 @@ class RelayClient:
 
             try:
                 # Clean up old connection
-                await self._disconnect_channel()
+                await self._disconnect_do()
 
                 # Attempt reconnection
-                if await self._connect_channel():
+                if await self._connect_do():
                     connection_logger.log(
                         "reconnected",
                         detail=f"After {self.reconnect_attempts} attempts",
@@ -785,19 +691,15 @@ class RelayClient:
         # Start reconnection
         self._reconnect_task = asyncio.create_task(self._reconnect())
 
-    async def _check_channel_alive(self) -> bool:
-        """Test channel liveness by attempting a broadcast send."""
-        if not self.channel:
+    async def _check_do_alive(self) -> bool:
+        """Test DO WebSocket liveness by sending a ping."""
+        if not self._do_ws:
             return False
         try:
-            await self.channel.send_broadcast("heartbeat", {
-                "machine_id": self.machine_id,
-                "ts": datetime.utcnow().isoformat()
-            })
-            self.last_channel_activity = datetime.utcnow()
+            await self._do_ws.send(json.dumps({"type": "ping"}))
             return True
         except Exception as e:
-            connection_logger.log("channel_send_failed", error=str(e), detail="liveness probe")
+            connection_logger.log("do_ping_failed", error=str(e), detail="liveness probe")
             return False
 
     async def _refresh_auth(self):
@@ -829,39 +731,41 @@ class RelayClient:
             self._auth_refreshing = False
 
     async def _health_check_loop(self):
-        """Monitor connection health via direct channel liveness probe.
+        """Monitor DO WebSocket connection health.
 
-        Instead of relying on cloud heartbeat staleness (which conflates
-        cloud API health with channel health), we test the Supabase channel
-        directly by attempting a broadcast send every 30s.
+        Tests the DO WebSocket liveness every 30s by sending a ping.
+        The DO WebSocket's built-in ping/pong (websockets library) handles
+        most detection, but this provides an application-level check.
         """
+        liveness_failures = 0
+
         while self._running:
             try:
                 await asyncio.sleep(CONNECTION_HEALTH_CHECK_INTERVAL)
 
                 if self.connection_state != ConnectionState.CONNECTED:
-                    self._channel_liveness_failures = 0
+                    liveness_failures = 0
                     continue
 
-                # Direct channel liveness test
-                alive = await self._check_channel_alive()
+                # DO WebSocket liveness test
+                alive = await self._check_do_alive()
 
                 if alive:
-                    self._channel_liveness_failures = 0
-                    connection_logger.log("channel_liveness_ok")
+                    liveness_failures = 0
+                    connection_logger.log("do_liveness_ok")
                 else:
-                    self._channel_liveness_failures += 1
-                    print(f"[Relay] Channel liveness probe failed ({self._channel_liveness_failures}x)")
+                    liveness_failures += 1
+                    print(f"[Relay] DO liveness probe failed ({liveness_failures}x)")
 
-                    # 2 consecutive failures → channel is dead, reconnect
-                    if self._channel_liveness_failures >= 2:
+                    # 2 consecutive failures → connection is dead, reconnect
+                    if liveness_failures >= 2:
                         connection_logger.log(
                             "health_check_triggered_reconnect",
-                            detail=f"Channel liveness failed {self._channel_liveness_failures}x",
-                            reason="channel_dead",
+                            detail=f"DO liveness failed {liveness_failures}x",
+                            reason="do_dead",
                         )
-                        print(f"[Relay] Channel appears dead — reconnecting")
-                        self._channel_liveness_failures = 0
+                        print(f"[Relay] DO connection appears dead — reconnecting")
+                        liveness_failures = 0
                         await self._trigger_reconnect()
 
             except asyncio.CancelledError:
@@ -871,7 +775,7 @@ class RelayClient:
 
     async def connect(self):
         """
-        Connect to Supabase Realtime and start receiving requests.
+        Connect to the stream bridge DO and start receiving requests.
         Includes auto-reconnect on connection loss.
         """
         if not self.relay_config:
@@ -901,7 +805,7 @@ class RelayClient:
         self._running = True
 
         # Initial connection
-        if not await self._connect_channel():
+        if not await self._connect_do():
             print("[Relay] Initial connection failed, starting reconnection loop...")
             await self._reconnect()
             if not self._running:
@@ -988,8 +892,8 @@ class RelayClient:
         """Send periodic heartbeats to cloud API and local server.
 
         Cloud API failures (500s, timeouts) are logged but do NOT trigger
-        Supabase reconnection — the channel liveness probe in _health_check_loop
-        handles actual channel death separately.
+        DO reconnection — the liveness probe in _health_check_loop
+        handles actual connection death separately.
         """
         consecutive_failures = 0
 
@@ -1035,7 +939,7 @@ class RelayClient:
                         print(f"[Relay] {consecutive_failures} consecutive heartbeat failures — triggering reconnect")
                         connection_logger.log("heartbeat_triggered_reconnect", detail=f"{consecutive_failures} consecutive failures")
                         consecutive_failures = 0
-                        self._trigger_reconnect()
+                        await self._trigger_reconnect()
 
                 # Heartbeat to local server (so dashboard knows relay is connected)
                 await self._send_local_heartbeat()
@@ -1087,55 +991,12 @@ class RelayClient:
         print("[Relay] Disconnected. Goodbye!")
         sys.exit(0)
 
-    def _send_pong(self):
-        """Respond to ping with pong (wrapped in task for async send)."""
-        async def _do_pong():
-            try:
-                await self.channel.send_broadcast("pong", {
-                    "machine_id": self.machine_id,
-                    "timestamp": datetime.utcnow().isoformat()
-                })
-                self.last_channel_activity = datetime.utcnow()
-            except Exception as e:
-                connection_logger.log("channel_send_failed", error=str(e), detail="pong")
-
-        self._create_tracked_task(_do_pong())
-
-    async def _handle_message(self, payload: Dict[str, Any]):
-        """Handle incoming message from cloud."""
-        try:
-            # The broadcast payload may be nested: { event: "...", payload: { actual data } }
-            # or flat: { actual data }
-            actual_payload = payload.get("payload", payload) if isinstance(payload, dict) else payload
-
-            msg_type = actual_payload.get("type", "request")
-            self._request_count += 1
-            self._tui_update(requests_handled=self._request_count)
-            print(f"[Relay] Received {msg_type}: {actual_payload.get('method', '')} {actual_payload.get('path', '')}")
-
-            if msg_type == "stream_start":
-                # Start SSE streaming for an agent
-                self._create_tracked_task(self._handle_stream_start(actual_payload))
-            elif msg_type in ("request", "stream_request"):
-                response = await self._execute_local_request(actual_payload)
-                try:
-                    await self.channel.send_broadcast("response", response)
-                    self.last_channel_activity = datetime.utcnow()
-                    print(f"[Relay] Sent response: status={response.get('status')}")
-                except Exception as e:
-                    connection_logger.log("channel_send_failed", error=str(e), detail="response")
-                    print(f"[Relay] Failed to send response: {e}")
-
-        except Exception as e:
-            print(f"[Relay] Error handling message: {e}")
-
-    async def _handle_stream_start(self, payload: Dict[str, Any], via_do: bool = False):
+    async def _handle_stream_start(self, payload: Dict[str, Any], via_do: bool = True):
         """Handle SSE stream start request - connect to local SSE and forward events.
 
         Args:
             payload: The stream_start message with stream_id and agent_id.
-            via_do: If True, the request came via the DO WebSocket, so stream
-                    events back through the DO. Otherwise use Supabase broadcast.
+            via_do: Always True — all streaming goes through the DO WebSocket.
         """
         stream_id = payload.get("stream_id")
         agent_id = payload.get("agent_id")
@@ -1144,8 +1005,8 @@ class RelayClient:
             print(f"[Relay] Stream start missing stream_id or agent_id")
             return
 
-        use_do = via_do and self._do_ws is not None
-        transport = "DO bridge" if use_do else "Supabase"
+        use_do = True
+        transport = "DO bridge"
 
         url = f"http://127.0.0.1:{self.local_port}/api/local-claude/agents/{agent_id}/stream"
         print(f"[Relay] Starting SSE stream for agent {agent_id}, stream_id={stream_id} via {transport}")
