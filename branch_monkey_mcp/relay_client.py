@@ -1030,31 +1030,12 @@ class RelayClient:
                     if consecutive_failures <= 3 or consecutive_failures % 10 == 0:
                         print(f"[Relay] Cloud heartbeat failed ({consecutive_failures}x): {e}")
 
-                    # Self-heal DNS failures: after 10+ consecutive failures,
-                    # flush OS DNS cache and retry immediately
-                    if consecutive_failures >= 10 and consecutive_failures % 10 == 0 and "nodename" in error_str:
-                        print(f"[Relay] DNS failure persisting ({consecutive_failures}x) — flushing DNS cache")
-                        try:
-                            import subprocess
-                            subprocess.run(["dscacheutil", "-flushcache"], timeout=5, capture_output=True)
-                            subprocess.run(["sudo", "killall", "-HUP", "mDNSResponder"], timeout=5, capture_output=True)
-                        except Exception:
-                            pass
-                        await asyncio.sleep(3)
-                        # Retry once immediately after flush
-                        try:
-                            await self._cloud_heartbeat("online")
-                            self.last_successful_heartbeat = datetime.utcnow()
-                            consecutive_failures = 0
-                            self._tui_update(last_heartbeat=datetime.now(timezone.utc))
-                            connection_logger.log("heartbeat_ok", detail="Recovered after DNS flush")
-                            print("[Relay] DNS recovered — heartbeat OK")
-                        except Exception:
-                            pass  # Will retry next loop iteration
-
-                    # Do NOT trigger reconnect — cloud API failures don't mean
-                    # the Supabase channel is dead. The health check loop
-                    # uses a direct channel liveness probe for that.
+                    # Self-heal: after 20 consecutive failures, trigger full reconnect
+                    if consecutive_failures >= 20:
+                        print(f"[Relay] {consecutive_failures} consecutive heartbeat failures — triggering reconnect")
+                        connection_logger.log("heartbeat_triggered_reconnect", detail=f"{consecutive_failures} consecutive failures")
+                        consecutive_failures = 0
+                        self._trigger_reconnect()
 
                 # Heartbeat to local server (so dashboard knows relay is connected)
                 await self._send_local_heartbeat()
