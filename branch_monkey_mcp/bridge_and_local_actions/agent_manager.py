@@ -428,7 +428,24 @@ Do NOT create another worktree - you are already isolated. Skip any worktree cre
         if agent.process:
             agent.exit_code = agent.process.wait()
 
-        if agent.session_id:
+        # Cron agents (with callback) should complete, not pause — they don't need
+        # session resumption and would otherwise linger in the compute pool.
+        if agent.callback:
+            agent.status = "completed" if agent.exit_code == 0 else "failed"
+            agent.session_id = None  # Don't keep session — allows cleanup
+            print(f"[LocalAgent] Cron agent {agent.id} {agent.status} (exit={agent.exit_code})")
+
+            for queue in agent.output_listeners:
+                try:
+                    await queue.put({
+                        "type": "exit",
+                        "exit_code": agent.exit_code
+                    })
+                except Exception:
+                    pass
+
+            await self._fire_callback(agent)
+        elif agent.session_id:
             agent.status = "paused"
             print(f"[LocalAgent] Agent {agent.id} paused, session can be resumed")
 
@@ -453,10 +470,6 @@ Do NOT create another worktree - you are already isolated. Skip any worktree cre
                     })
                 except Exception:
                     pass
-
-        # Fire completion callback (for cron-triggered agents)
-        if agent.callback:
-            await self._fire_callback(agent)
 
     def _extract_result(self, agent: LocalAgent) -> str:
         """Extract the final result text from the agent's output buffer.
