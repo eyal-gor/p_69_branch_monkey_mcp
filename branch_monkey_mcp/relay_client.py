@@ -1249,30 +1249,30 @@ def setup_mcp_config(working_dir: str, cloud_url: str = DEFAULT_CLOUD_URL) -> bo
                 config["mcpServers"] = {}
 
             # Check if already configured
-            if "branch-monkey-cloud" in config["mcpServers"]:
+            if "kompany-cloud" in config["mcpServers"]:
                 print(f"[MCP] Config already exists in {mcp_file}")
                 return False
 
             # Add our config
-            config["mcpServers"]["branch-monkey-cloud"] = mcp_server_config
+            config["mcpServers"]["kompany-cloud"] = mcp_server_config
 
             with open(mcp_file, "w") as f:
                 json.dump(config, f, indent=2)
 
-            print(f"[MCP] Added branch-monkey-cloud to {mcp_file}")
+            print(f"[MCP] Added kompany-cloud to {mcp_file}")
             return True
         else:
             # Create new config
             config = {
                 "mcpServers": {
-                    "branch-monkey-cloud": mcp_server_config
+                    "kompany-cloud": mcp_server_config
                 }
             }
 
             with open(mcp_file, "w") as f:
                 json.dump(config, f, indent=2)
 
-            print(f"[MCP] Created {mcp_file} with branch-monkey-cloud config")
+            print(f"[MCP] Created {mcp_file} with kompany-cloud config")
             return True
 
     except Exception as e:

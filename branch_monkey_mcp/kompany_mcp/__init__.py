@@ -8,7 +8,7 @@ Usage:
     Add to .mcp.json in your project:
         {
             "mcpServers": {
-                "branch-monkey-cloud": {
+                "kompany-cloud": {
                     "command": "uvx",
                     "args": ["--from", "git+https://github.com/gneyal/p_69_branch_monkey_mcp.git", "branch-monkey-mcp"],
                     "env": {

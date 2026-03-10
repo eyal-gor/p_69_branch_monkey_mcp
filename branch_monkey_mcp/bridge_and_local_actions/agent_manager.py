@@ -64,25 +64,35 @@ class LocalAgentManager:
         stale_ids = []
 
         for agent_id, agent in self._agents.items():
-            # Remove failed/stopped agents, but keep completed ones with session_id for resumption
+            # Remove failed/stopped agents
             if agent.status in ("failed", "stopped"):
-                stale_ids.append(agent_id)
-                continue
-            if agent.status == "completed" and not agent.session_id:
-                # Only clean up completed agents without session_id
                 stale_ids.append(agent_id)
                 continue
 
             # Check if process is still running
+            process_exited = False
             if agent.process:
                 poll = agent.process.poll()
                 if poll is not None:
-                    # Process has exited - but keep if it has a session_id for resumption
-                    if not agent.session_id:
-                        stale_ids.append(agent_id)
+                    process_exited = True
+
+            # Remove completed/paused agents whose process has exited and are past stale timeout
+            if agent.status in ("completed", "paused") or process_exited:
+                if agent.created_at:
+                    try:
+                        age = (now - agent.created_at).total_seconds()
+                        if age > self.STALE_TIMEOUT:
+                            print(f"[LocalAgent] Agent {agent_id} is stale ({agent.status}, age={int(age)}s)")
+                            stale_ids.append(agent_id)
+                            continue
+                    except Exception:
+                        pass
+                # No session_id = no resumption value, clean immediately
+                if not agent.session_id:
+                    stale_ids.append(agent_id)
                     continue
 
-            # Check for stale agents (no activity for a while)
+            # Check for stale agents (no activity for a while) regardless of status
             if agent.created_at:
                 try:
                     if (now - agent.created_at).total_seconds() > self.STALE_TIMEOUT:

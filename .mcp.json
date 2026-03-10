@@ -1,6 +1,6 @@
 {
   "mcpServers": {
-    "branch-monkey-cloud": {
+    "kompany-cloud": {
       "command": "uvx",
       "args": [
         "--from",
