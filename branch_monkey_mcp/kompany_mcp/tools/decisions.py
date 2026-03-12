@@ -233,14 +233,16 @@ def kompany_decision_update(
 
 @mcp.tool()
 def kompany_decision_check(decision_id: str) -> str:
-    """Check the resolution status of a decision.
+    """Check the full details of a decision including blocks.
 
-    Use this to see if the user has approved/rejected a decision you created.
+    Returns status, metadata, and block content (for reading before updating).
 
     Args:
         decision_id: The UUID of the decision to check
     """
     try:
+        import json as _json
+
         result = api_get(f"/api/decisions/{decision_id}")
         d = result.get("decision", result)
 
@@ -253,6 +255,14 @@ def kompany_decision_check(decision_id: str) -> str:
         }.get(status, "❓")
 
         output = f"{icon} **{d.get('title')}** — {status}\n"
+        output += f"   ID: `{d.get('id')}`"
+        if d.get("agent_id"):
+            output += f" | Agent: `{d.get('agent_id')}`"
+        if d.get("task_id"):
+            output += f" | Task: `{d.get('task_id')}`"
+        if d.get("machine_id"):
+            output += f" | Machine: `{d.get('machine_id')}`"
+        output += "\n"
 
         if status == "pending":
             output += "\nThe user has not responded yet."
@@ -260,6 +270,18 @@ def kompany_decision_check(decision_id: str) -> str:
             output += f"\nResolved with: **{d['resolved_option']}** at {d.get('resolved_at', 'unknown')}"
         else:
             output += f"\nResolved at {d.get('resolved_at', 'unknown')}"
+
+        if d.get("description"):
+            desc = d["description"][:200]
+            output += f"\n\n**Description:** {desc}{'...' if len(d['description']) > 200 else ''}"
+
+        if d.get("options"):
+            output += f"\n**Options:** {', '.join(d['options'])}"
+
+        blocks = d.get("blocks") or []
+        if blocks:
+            output += f"\n\n**Blocks ({len(blocks)}):**\n"
+            output += f"```json\n{_json.dumps(blocks, indent=2)}\n```"
 
         return output
     except Exception as e:
