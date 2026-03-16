@@ -99,17 +99,24 @@ def device_code_flow(api_url: str) -> Optional[dict]:
         expires_in = data.get("expires_in", 900)
         interval = data.get("interval", 5)
 
-        print(f"\n  To authorize this device, visit:\n", file=sys.stderr)
-        print(f"    {verification_uri}", file=sys.stderr)
-        print(f"\n  Or enter this code at {api_url}/approve:\n", file=sys.stderr)
-        print(f"    {user_code}", file=sys.stderr)
-        print(f"\n  Waiting for approval...", file=sys.stderr)
-        print("=" * 60 + "\n", file=sys.stderr)
+        # Check if device was auto-approved (trusted device)
+        auto_approved = data.get("auto_approved", False)
 
-        try:
-            webbrowser.open(verification_uri)
-        except Exception:
-            pass
+        if auto_approved:
+            print(f"\n  Device auto-approved (trusted device)", file=sys.stderr)
+            print("=" * 60 + "\n", file=sys.stderr)
+        else:
+            print(f"\n  To authorize this device, visit:\n", file=sys.stderr)
+            print(f"    {verification_uri}", file=sys.stderr)
+            print(f"\n  Or enter this code at {api_url}/approve:\n", file=sys.stderr)
+            print(f"    {user_code}", file=sys.stderr)
+            print(f"\n  Waiting for approval...", file=sys.stderr)
+            print("=" * 60 + "\n", file=sys.stderr)
+
+            try:
+                webbrowser.open(verification_uri)
+            except Exception:
+                pass
 
         start_time = time.time()
         while time.time() - start_time < expires_in:

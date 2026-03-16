@@ -357,21 +357,28 @@ class RelayClient:
             expires_in = data.get("expires_in", 900)
             interval = data.get("interval", 5)
 
-            self._tui_update(auth_state="waiting", auth_url=verification_uri, auth_code=user_code)
+            # Check if device was auto-approved (trusted device)
+            auto_approved = data.get("auto_approved", False)
 
-            print(f"\n{'='*50}")
-            print(f"  To authorize this device, visit:")
-            print(f"  {verification_uri}")
-            print(f"\n  Or go to {self.cloud_url}/approve")
-            print(f"  and enter code: {user_code}")
-            print(f"{'='*50}\n")
+            if auto_approved:
+                print(f"[Relay] Device auto-approved (trusted device)")
+                self._tui_update(auth_state="waiting", auth_url=verification_uri, auth_code=user_code)
+            else:
+                self._tui_update(auth_state="waiting", auth_url=verification_uri, auth_code=user_code)
 
-            # Auto-open browser for authentication
-            try:
-                webbrowser.open(verification_uri)
-                print(f"[Relay] Opening browser for authentication...")
-            except Exception:
-                pass  # Browser open failed, user can manually visit URL
+                print(f"\n{'='*50}")
+                print(f"  To authorize this device, visit:")
+                print(f"  {verification_uri}")
+                print(f"\n  Or go to {self.cloud_url}/approve")
+                print(f"  and enter code: {user_code}")
+                print(f"{'='*50}\n")
+
+                # Auto-open browser for authentication
+                try:
+                    webbrowser.open(verification_uri)
+                    print(f"[Relay] Opening browser for authentication...")
+                except Exception:
+                    pass  # Browser open failed, user can manually visit URL
 
             print(f"[Relay] Waiting for approval (expires in {expires_in//60} minutes)...")
 
