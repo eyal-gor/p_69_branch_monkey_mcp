@@ -74,6 +74,7 @@ class ImageData(BaseModel):
 class InputRequest(BaseModel):
     input: str
     images: Optional[List[ImageData]] = None
+    cli_tool: Optional[str] = None  # Override CLI provider before first message (prepared sessions only)
 
 
 def save_images_to_temp(images: List[ImageData]) -> List[str]:
@@ -255,8 +256,13 @@ async def send_input(agent_id: str, request: InputRequest):
 
     # Handle prepared sessions: first message spawns the CLI process
     if agent["status"] == "prepared":
+        # Allow overriding CLI tool before spawning (user may have changed selection)
+        if request.cli_tool:
+            agent_obj = agent_manager._agents.get(agent_id)
+            if agent_obj:
+                agent_obj.cli_tool = request.cli_tool
         await agent_manager.spawn_cli_process(agent_id, message, image_paths)
-        return {"success": True, "action": "started", "images": len(image_paths)}
+        return {"success": True, "action": "started", "cli_tool": agent.get("cli_tool"), "images": len(image_paths)}
 
     if agent["status"] in ("paused", "completed", "failed") and agent.get("session_id"):
         await agent_manager.resume_session(agent_id, message, image_paths)
