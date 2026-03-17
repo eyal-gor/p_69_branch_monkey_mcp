@@ -439,75 +439,121 @@ class CodexProvider(CliProvider):
     def normalize_event(self, raw_json):
         """Normalize Codex JSON output to Claude stream-json format.
 
-        Codex emits newline-delimited JSON with different event types.
-        We translate them to match Claude's stream-json format so the
-        frontend streaming code works unchanged.
+        Codex v0.115+ emits:
+          {"type":"thread.started","thread_id":"..."}
+          {"type":"turn.started"}
+          {"type":"item.completed","item":{"type":"agent_message","text":"..."}}
+          {"type":"item.started","item":{"type":"command_execution","command":"...","status":"in_progress"}}
+          {"type":"item.completed","item":{"type":"command_execution","command":"...","exit_code":0,"aggregated_output":"..."}}
+          {"type":"turn.completed","usage":{...}}
+
+        We normalize to Claude's stream-json format.
         """
         event_type = raw_json.get("type", "")
 
-        # Map Codex init/session events
-        if event_type in ("session.start", "session_start"):
+        # Thread start → system init
+        if event_type == "thread.started":
             return {
                 "type": "system",
                 "subtype": "init",
-                "session_id": raw_json.get("session_id", raw_json.get("id", "")),
+                "session_id": raw_json.get("thread_id", ""),
                 "provider": "codex"
             }
 
-        # Map message/response events to assistant format
-        if event_type in ("message", "response", "content"):
-            text = raw_json.get("text", raw_json.get("content", raw_json.get("message", "")))
-            if isinstance(text, dict):
-                text = text.get("text", str(text))
-            return {
-                "type": "assistant",
-                "message": {
-                    "content": [{"type": "text", "text": str(text)}]
+        # Turn started → skip (no equivalent needed)
+        if event_type == "turn.started":
+            return None
+
+        # Item events — the main content
+        if event_type in ("item.completed", "item.started"):
+            item = raw_json.get("item", {})
+            item_type = item.get("type", "")
+
+            # Agent message → assistant text
+            if item_type == "agent_message":
+                text = item.get("text", "")
+                if not text:
+                    return None
+                return {
+                    "type": "assistant",
+                    "message": {
+                        "content": [{"type": "text", "text": text}]
+                    }
                 }
-            }
 
-        # Map tool use events
-        if event_type in ("tool_use", "function_call", "tool_call"):
-            return {
-                "type": "assistant",
-                "message": {
-                    "content": [{
-                        "type": "tool_use",
-                        "name": raw_json.get("name", raw_json.get("tool", "unknown")),
-                        "input": raw_json.get("input", raw_json.get("arguments", {}))
-                    }]
-                }
-            }
+            # Command execution → tool use / tool result
+            if item_type == "command_execution":
+                command = item.get("command", "")
+                status = item.get("status", "")
 
-        # Map tool result events
-        if event_type in ("tool_result", "function_result"):
-            return {
-                "type": "tool_result",
-                "content": raw_json.get("output", raw_json.get("result", ""))
-            }
+                if event_type == "item.started" or status == "in_progress":
+                    # Tool invocation
+                    return {
+                        "type": "assistant",
+                        "message": {
+                            "content": [{
+                                "type": "tool_use",
+                                "name": "Bash",
+                                "input": {"command": command}
+                            }]
+                        }
+                    }
+                else:
+                    # Tool result (completed)
+                    output = item.get("aggregated_output", "")
+                    exit_code = item.get("exit_code", None)
+                    result_text = output
+                    if exit_code is not None and exit_code != 0:
+                        result_text += f"\n(exit code: {exit_code})"
+                    return {
+                        "type": "tool_result",
+                        "content": result_text
+                    }
 
-        # Map completion/done events
-        if event_type in ("done", "complete", "result", "session.end"):
+            # File operations or other item types
+            if item_type in ("file_read", "file_write", "file_edit"):
+                fname = item.get("file", item.get("path", ""))
+                if event_type == "item.started":
+                    return {
+                        "type": "assistant",
+                        "message": {
+                            "content": [{
+                                "type": "tool_use",
+                                "name": item_type.replace("_", " ").title().replace(" ", ""),
+                                "input": {"file": fname}
+                            }]
+                        }
+                    }
+                else:
+                    return {
+                        "type": "tool_result",
+                        "content": item.get("output", item.get("text", f"Completed: {fname}"))
+                    }
+
+        # Turn completed → result
+        if event_type == "turn.completed":
             return {
                 "type": "result",
-                "result": raw_json.get("result", raw_json.get("output", raw_json.get("text", "")))
+                "result": "",
+                "usage": raw_json.get("usage", {})
             }
 
-        # Pass through unknown events as-is (the frontend can handle them)
+        # Pass through unknown events
         return raw_json
 
     def extract_session_id(self, event):
-        # Check both raw and normalized formats
-        if event.get("type") in ("session.start", "session_start"):
-            return event.get("session_id", event.get("id"))
-        # Also check normalized format
-        if (event.get("type") == "system" and event.get("subtype") == "init"):
+        # Check Codex thread.started format
+        if event.get("type") == "thread.started":
+            return event.get("thread_id")
+        # Check normalized format
+        if event.get("type") == "system" and event.get("subtype") == "init":
             return event.get("session_id")
         return None
 
     def is_noise(self, text):
         noise_prefixes = ("warn:", "Warning:", "DeprecationWarning", "[DEP", "npm warn")
-        return text.startswith(noise_prefixes)
+        noise_substrings = ("ERROR codex_core::skills", "ERROR codex_core::codex", "failed to load skill", "failed to stat skills")
+        return text.startswith(noise_prefixes) or any(s in text for s in noise_substrings)
 
 
 class GrokProvider(CliProvider):
