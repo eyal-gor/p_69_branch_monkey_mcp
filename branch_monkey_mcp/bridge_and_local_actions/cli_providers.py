@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional
 
 
@@ -265,13 +266,51 @@ _PROVIDERS: Dict[str, CliProvider] = {
     "codex": CodexProvider(),
 }
 
-# Default provider
-DEFAULT_CLI = "claude"
+# Fallback default when no persistent config exists
+_FALLBACK_CLI = "claude"
+
+# Persistent config path
+_CONFIG_FILE = Path.home() / ".kompany" / "config.json"
+
+
+def _load_config() -> dict:
+    """Load ~/.kompany/config.json."""
+    if _CONFIG_FILE.exists():
+        try:
+            with open(_CONFIG_FILE) as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def _save_config(updates: dict):
+    """Merge and save to ~/.kompany/config.json."""
+    config = _load_config()
+    config.update(updates)
+    _CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(_CONFIG_FILE, "w") as f:
+        json.dump(config, f, indent=2)
+
+
+def get_default_cli() -> str:
+    """Get the default CLI provider from persistent config, falling back to 'claude'."""
+    saved = _load_config().get("default_cli")
+    if saved and saved in _PROVIDERS:
+        return saved
+    return _FALLBACK_CLI
+
+
+def set_default_cli(name: str):
+    """Set the default CLI provider and persist to config."""
+    if name not in _PROVIDERS:
+        raise ValueError(f"Unknown CLI provider: {name}. Available: {list(_PROVIDERS.keys())}")
+    _save_config({"default_cli": name})
 
 
 def get_provider(name: Optional[str] = None) -> CliProvider:
     """Get a CLI provider by name. Falls back to default."""
-    name = name or DEFAULT_CLI
+    name = name or get_default_cli()
     provider = _PROVIDERS.get(name)
     if not provider:
         raise ValueError(f"Unknown CLI provider: {name}. Available: {list(_PROVIDERS.keys())}")
@@ -280,6 +319,7 @@ def get_provider(name: Optional[str] = None) -> CliProvider:
 
 def get_available_providers() -> Dict[str, dict]:
     """Return info about all registered providers and their availability."""
+    default = get_default_cli()
     result = {}
     for name, provider in _PROVIDERS.items():
         path = provider.is_available()
@@ -289,5 +329,6 @@ def get_available_providers() -> Dict[str, dict]:
             "installed": path is not None,
             "path": path,
             "install_hint": provider.install_hint,
+            "is_default": name == default,
         }
     return result

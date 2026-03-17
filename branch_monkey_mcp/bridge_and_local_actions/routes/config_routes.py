@@ -14,6 +14,7 @@ from ..config import (
     set_default_working_dir,
     get_app_config,
 )
+from ..cli_providers import get_available_providers, get_default_cli, set_default_cli
 from ..git_utils import get_git_root
 
 router = APIRouter()
@@ -22,6 +23,11 @@ router = APIRouter()
 class WorkingDirectoryRequest(BaseModel):
     """Request to set working directory."""
     directory: str
+
+
+class CliPreferenceRequest(BaseModel):
+    """Request to set default CLI tool."""
+    cli_tool: str
 
 
 @router.get("/config/working-directory")
@@ -87,6 +93,30 @@ def set_working_directory_endpoint(request: WorkingDirectoryRequest):
         "git_root": git_root,
         "is_git_repo": git_root is not None,
         "worktree_count": worktree_count
+    }
+
+
+@router.get("/config/cli")
+def get_cli_config():
+    """Get CLI provider configuration: default CLI and available providers."""
+    return {
+        "default_cli": get_default_cli(),
+        "providers": get_available_providers(),
+    }
+
+
+@router.post("/config/cli")
+def set_cli_config(request: CliPreferenceRequest):
+    """Set the default CLI provider."""
+    try:
+        set_default_cli(request.cli_tool)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "status": "ok",
+        "default_cli": request.cli_tool,
+        "providers": get_available_providers(),
     }
 
 

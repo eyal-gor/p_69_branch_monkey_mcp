@@ -1323,6 +1323,24 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
 
     tui = RelayTUI()
 
+    # Detect installed CLI providers early (needed by callbacks)
+    persistent_cfg = load_persistent_config()
+    try:
+        from .bridge_and_local_actions.cli_providers import get_available_providers, get_default_cli
+        cli_providers = get_available_providers()
+        default_cli = get_default_cli()
+        installed_clis = [n for n, p in cli_providers.items() if p.get("installed")]
+        # If no default saved yet and multiple CLIs available, prompt on first run
+        _cli_prompt_needed = (
+            not onboarding_needed
+            and "default_cli" not in persistent_cfg
+            and len(installed_clis) > 1
+        )
+    except Exception:
+        cli_providers = {}
+        default_cli = "claude"
+        _cli_prompt_needed = False
+
     # Callback when user sets home dir during onboarding or [H] edit
     def on_home_set(path):
         save_persistent_config({"home_dir": path})
@@ -1353,6 +1371,9 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
             tui.update(launchd="not_installed")
             print("[Relay] Launchd service removed.")
         tui.update(launchd_prompt="done")
+        # Show CLI selection if needed (first run with multiple CLIs)
+        if _cli_prompt_needed and tui.state.get("cli_prompt") is None:
+            tui.update(cli_prompt="pending")
 
     tui._on_launchd_install = on_launchd_toggle
 
@@ -1363,6 +1384,17 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
         print("[Relay] Logged out. Token cleared.")
 
     tui._on_logout = on_logout
+
+    # Callback when user selects a CLI provider
+    def on_cli_set(cli_name):
+        try:
+            from .bridge_and_local_actions.cli_providers import set_default_cli
+            set_default_cli(cli_name)
+            print(f"[Relay] Default CLI set to: {cli_name}")
+        except Exception as e:
+            print(f"[Relay] Failed to set CLI: {e}")
+
+    tui._on_cli_set = on_cli_set
 
     # Detect current launchd status
     if sys.platform == "darwin":
@@ -1401,6 +1433,8 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
         org_name=cached_org_name,
         onboarding_needed=onboarding_needed,
         launchd=launchd_state,
+        cli_providers=cli_providers,
+        default_cli=default_cli,
     )
     tui.install_capture()
 
@@ -1681,8 +1715,22 @@ def main():
         action="store_true",
         help="Disable terminal UI, show raw logs instead"
     )
+    parser.add_argument(
+        "--cli",
+        default=None,
+        choices=["claude", "codex"],
+        help="Set default AI CLI provider (claude or codex)"
+    )
 
     args = parser.parse_args()
+
+    # Handle --cli flag: persist default CLI choice
+    if args.cli:
+        try:
+            from .bridge_and_local_actions.cli_providers import set_default_cli
+            set_default_cli(args.cli)
+        except Exception as e:
+            print(f"[Relay] Warning: Could not set CLI preference: {e}")
 
     # Check for working directory in this order:
     # 1. --dir flag (if explicitly provided, not default)
@@ -1776,6 +1824,24 @@ def main():
         print(f"  Project:   \033[1m{project_name}\033[0m \033[38;2;107;114;128m({current_project})\033[0m")
     else:
         print(f"  Project:   \033[38;2;107;114;128m(none selected - pick one in dashboard)\033[0m")
+
+    # Show detected CLI providers
+    try:
+        from .bridge_and_local_actions.cli_providers import get_available_providers, get_default_cli
+        _cli_providers = get_available_providers()
+        _default_cli = get_default_cli()
+        first_line = True
+        for name, info in _cli_providers.items():
+            if info.get("installed"):
+                suffix = " (default)" if name == _default_cli else " (installed)"
+                label = "  AI CLI:    " if first_line else "             "
+                print(f"{label}\033[1m{info['display_name']}\033[0m\033[38;2;107;114;128m{suffix}\033[0m")
+                first_line = False
+        if first_line:
+            print(f"  AI CLI:    \033[38;2;107;114;128m(none detected)\033[0m")
+    except Exception:
+        pass
+
     print(f"  Dashboard: \033[1mhttp://localhost:{args.port}/\033[0m")
     print(f"")
 

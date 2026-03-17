@@ -17,7 +17,7 @@ from typing import Dict, List, Optional
 
 from fastapi import HTTPException
 
-from .cli_providers import get_provider, get_available_providers, DEFAULT_CLI, CliProvider
+from .cli_providers import get_provider, get_available_providers, get_default_cli, CliProvider
 from .config import get_default_working_dir
 from .git_utils import is_git_repo, get_current_branch, generate_branch_name
 from .worktree import create_worktree, remove_worktree
@@ -37,7 +37,7 @@ class LocalAgent:
     branch: Optional[str]
     branch_created: bool
     status: str  # prepared, starting, running, paused, completed, failed, stopped
-    cli_tool: str = DEFAULT_CLI  # Which CLI provider to use
+    cli_tool: str = ""  # Which CLI provider to use (resolved at creation time)
     pid: Optional[int] = None
     process: Optional[subprocess.Popen] = None
     output_buffer: List[str] = field(default_factory=list)

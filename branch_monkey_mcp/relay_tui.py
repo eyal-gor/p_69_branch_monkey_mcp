@@ -94,6 +94,9 @@ class RelayTUI:
             "stream_bridge": None,  # None=not started, True=connected, False=disconnected, str=error
             "launchd": None,  # None=unknown, "running", "installed", "not_installed", "error"
             "launchd_prompt": None,  # None=don't show, "pending"=showing, "done"=answered
+            "cli_providers": {},  # {name: {display_name, installed, ...}}
+            "default_cli": "claude",
+            "cli_prompt": None,  # None=don't show, "pending"=showing, "done"=answered
         }
         self._stdout_capture = LogCapture(sys.stdout)
         self._stderr_capture = LogCapture(sys.stderr)
@@ -114,6 +117,8 @@ class RelayTUI:
         self._on_logout = None  # Callback when user logs out
         self._on_launchd_install = None  # Callback when user chooses launchd option
         self._launchd_selected = 0  # 0=Yes, 1=No for the prompt menu
+        self._on_cli_set = None  # Callback when user selects a CLI provider
+        self._cli_selected = 0  # Index into installed providers list
         self._verbose = False
 
     def install_capture(self):
@@ -215,6 +220,11 @@ class RelayTUI:
             self._handle_onboarding_key(key, stdscr)
             return
 
+        # CLI selection prompt mode
+        if s.get("cli_prompt") == "pending":
+            self._handle_cli_prompt_key(key)
+            return
+
         # Launchd prompt mode
         if s.get("launchd_prompt") == "pending":
             self._handle_launchd_prompt_key(key)
@@ -282,6 +292,15 @@ class RelayTUI:
                     self._on_launchd_install(False)  # uninstall
                 else:
                     self._on_launchd_install(True)  # install
+        elif key == ord("c") or key == ord("C"):
+            if self._view == "dashboard":
+                # Open CLI selection prompt
+                providers = self.state.get("cli_providers", {})
+                installed = [n for n, p in providers.items() if p.get("installed")]
+                if installed:
+                    current = self.state.get("default_cli", "claude")
+                    self._cli_selected = installed.index(current) if current in installed else 0
+                    self.state["cli_prompt"] = "pending"
         elif key == ord("d") or key == ord("D"):
             if self._view == "dashboard" and self._on_logout:
                 self._on_logout()
@@ -368,6 +387,11 @@ class RelayTUI:
             self._draw_launchd_prompt(stdscr, y, col, bar_w)
             return
 
+        # CLI selection prompt (after launchd, or when [C] pressed)
+        if s.get("cli_prompt") == "pending":
+            self._draw_cli_prompt(stdscr, y, col, bar_w)
+            return
+
         # Account info
         if s.get("user_email"):
             self._put(stdscr, y, lbl_col, "User", self._dim())
@@ -412,6 +436,19 @@ class RelayTUI:
             self._put(stdscr, y, lbl_col, "Project", self._dim())
             self._put(stdscr, y, val_col, s["project"], self._bold())
             y += 1
+
+        # AI CLI provider
+        providers = s.get("cli_providers", {})
+        default_cli = s.get("default_cli", "claude")
+        default_provider = providers.get(default_cli, {})
+        cli_display = default_provider.get("display_name", default_cli.title())
+        installed_count = sum(1 for p in providers.values() if p.get("installed"))
+        self._put(stdscr, y, lbl_col, "AI CLI", self._dim())
+        self._put(stdscr, y, val_col, cli_display, self._bold())
+        if installed_count > 1:
+            self._put(stdscr, y, val_col + len(cli_display) + 1, "[C]", self._dim())
+        y += 1
+
         dashboard_url = s.get("dashboard_url", f"http://localhost:{s['port']}/")
         self._put(stdscr, y, lbl_col, "Dashboard", self._dim())
         self._put(stdscr, y, val_col, dashboard_url, self._bold())
@@ -592,6 +629,10 @@ class RelayTUI:
         s_label = "Uninstall" if ld in ("running", "installed") else "Startup"
         self._put(stdscr, footer_y, x + 4, s_label, self._dim())
         x += 4 + len(s_label) + 2
+        if installed_count > 1:
+            self._put(stdscr, footer_y, x, "[C]", self._cyan() | self._bold())
+            self._put(stdscr, footer_y, x + 4, "CLI", self._dim())
+            x += 9
         self._put(stdscr, footer_y, x, "[V]", self._cyan() | self._bold())
         self._put(stdscr, footer_y, x + 4, "Verbose", self._dim())
         x += 13
@@ -776,6 +817,76 @@ class RelayTUI:
         x += 14
         self._put(stdscr, y, x, "[Enter]", self._cyan() | self._bold())
         self._put(stdscr, y, x + 8, "Confirm", self._dim())
+
+    def _handle_cli_prompt_key(self, key):
+        """Handle keyboard input during CLI selection prompt."""
+        providers = self.state.get("cli_providers", {})
+        installed = [n for n, p in providers.items() if p.get("installed")]
+        if not installed:
+            self.state["cli_prompt"] = "done"
+            return
+
+        if key in (curses.KEY_UP, ord("k")):
+            self._cli_selected = max(0, self._cli_selected - 1)
+        elif key in (curses.KEY_DOWN, ord("j")):
+            self._cli_selected = min(len(installed) - 1, self._cli_selected + 1)
+        elif key in (curses.KEY_ENTER, 10, 13):
+            chosen = installed[self._cli_selected]
+            self.state["default_cli"] = chosen
+            self.state["cli_prompt"] = "done"
+            if self._on_cli_set:
+                self._on_cli_set(chosen)
+        elif key == 27:  # Escape — cancel
+            self.state["cli_prompt"] = "done"
+
+    def _draw_cli_prompt(self, stdscr, y, col, bar_w):
+        """Draw the CLI provider selection screen."""
+        lbl_col = col + 2
+        providers = self.state.get("cli_providers", {})
+
+        self._put(stdscr, y, lbl_col, "Select AI CLI", self._bold())
+        y += 2
+        self._put(stdscr, y, lbl_col, "Choose the default CLI tool for running agents.", self._dim())
+        y += 2
+
+        installed = [n for n, p in providers.items() if p.get("installed")]
+        not_installed = [n for n, p in providers.items() if not p.get("installed")]
+
+        for i, name in enumerate(installed):
+            p = providers[name]
+            display = p.get("display_name", name)
+            if i == self._cli_selected:
+                self._put(stdscr, y, lbl_col, f"  \u25b8 {i+1}.", self._cyan() | self._bold())
+                self._put(stdscr, y, lbl_col + 7, display, self._cyan() | self._bold())
+            else:
+                self._put(stdscr, y, lbl_col + 4, f"{i+1}.", self._dim())
+                self._put(stdscr, y, lbl_col + 7, display)
+            y += 1
+
+        if not_installed:
+            y += 1
+            self._put(stdscr, y, lbl_col, "Not installed:", self._dim())
+            y += 1
+            for name in not_installed:
+                p = providers[name]
+                hint = p.get("install_hint", "")
+                self._put(stdscr, y, lbl_col + 2, f"{p.get('display_name', name)}", self._dim())
+                if hint:
+                    self._put(stdscr, y, lbl_col + 2 + len(p.get('display_name', name)) + 2, hint, self._dim())
+                y += 1
+
+        y += 1
+        self._hline(stdscr, y, col, bar_w)
+        y += 1
+        x = lbl_col
+        self._put(stdscr, y, x, "[\u2191\u2193]", self._cyan() | self._bold())
+        self._put(stdscr, y, x + 5, "Select", self._dim())
+        x += 14
+        self._put(stdscr, y, x, "[Enter]", self._cyan() | self._bold())
+        self._put(stdscr, y, x + 8, "Confirm", self._dim())
+        x += 18
+        self._put(stdscr, y, x, "[Esc]", self._cyan() | self._bold())
+        self._put(stdscr, y, x + 6, "Cancel", self._dim())
 
     def _draw_auth(self, stdscr, y, col, bar_w):
         s = self.state
