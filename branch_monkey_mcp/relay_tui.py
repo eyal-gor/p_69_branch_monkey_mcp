@@ -126,7 +126,9 @@ class RelayTUI:
         self._cli_device_auth = None  # {url, code, message} from device auth
         self._on_cli_api_key = None  # Callback(provider_name, key)
         self._on_cli_device_auth = None  # Callback(provider_name) -> starts async auth
+        self._on_cli_install = None  # Callback(provider_name) -> installs CLI async
         self._on_cli_refresh = None  # Callback() -> refreshes provider state
+        self._cli_installing = None  # Name of provider being installed
         self._verbose = False
 
     def install_capture(self):
@@ -833,6 +835,7 @@ class RelayTUI:
         """Handle keyboard input during CLI selection prompt."""
         providers = self.state.get("cli_providers", {})
         installed = [n for n, p in providers.items() if p.get("installed")]
+        not_installed = [n for n, p in providers.items() if not p.get("installed")]
         all_names = list(providers.keys())
 
         # --- API key input sub-mode ---
@@ -891,23 +894,25 @@ class RelayTUI:
             return
 
         # --- Main CLI selection ---
-        if not installed and not all_names:
+        # Navigate across ALL providers (installed first, then not-installed)
+        all_ordered = installed + not_installed
+        if not all_ordered:
             self.state["cli_prompt"] = "done"
             return
-
-        selectable = installed if installed else all_names
 
         if key in (curses.KEY_UP, ord("k")):
             self._cli_selected = max(0, self._cli_selected - 1)
         elif key in (curses.KEY_DOWN, ord("j")):
-            self._cli_selected = min(len(selectable) - 1, self._cli_selected + 1)
+            self._cli_selected = min(len(all_ordered) - 1, self._cli_selected + 1)
         elif key in (curses.KEY_ENTER, 10, 13):
-            if self._cli_selected < len(installed):
-                chosen = installed[self._cli_selected]
-                self.state["default_cli"] = chosen
-                self.state["cli_prompt"] = "done"
-                if self._on_cli_set:
-                    self._on_cli_set(chosen)
+            if self._cli_selected < len(all_ordered):
+                chosen = all_ordered[self._cli_selected]
+                p = providers.get(chosen, {})
+                if p.get("installed"):
+                    self.state["default_cli"] = chosen
+                    self.state["cli_prompt"] = "done"
+                    if self._on_cli_set:
+                        self._on_cli_set(chosen)
         elif key == 27:  # Escape — cancel
             self.state["cli_prompt"] = "done"
         elif key == ord("a") or key == ord("A"):
@@ -917,11 +922,17 @@ class RelayTUI:
             self._cli_api_key_cursor = 0
         elif key == ord("s") or key == ord("S"):
             # Start device auth for selected provider (runs async in background thread)
-            name = (installed[self._cli_selected] if self._cli_selected < len(installed)
-                    else all_names[self._cli_selected] if self._cli_selected < len(all_names)
-                    else None)
-            if name and self._on_cli_device_auth:
-                self._on_cli_device_auth(name)
+            if self._cli_selected < len(all_ordered):
+                name = all_ordered[self._cli_selected]
+                if self._on_cli_device_auth:
+                    self._on_cli_device_auth(name)
+        elif key == ord("i") or key == ord("I"):
+            # Install selected provider if not installed
+            if self._cli_selected < len(all_ordered):
+                name = all_ordered[self._cli_selected]
+                p = providers.get(name, {})
+                if not p.get("installed") and self._on_cli_install:
+                    self._on_cli_install(name)
 
     def _draw_cli_prompt(self, stdscr, y, col, bar_w):
         """Draw the CLI provider selection screen with auth status."""
@@ -1015,42 +1026,42 @@ class RelayTUI:
         self._put(stdscr, y, lbl_col, "Choose the default CLI tool for running agents.", self._dim())
         y += 2
 
-        for i, name in enumerate(installed):
+        # Show all providers — installed first, then not-installed
+        all_ordered = installed + not_installed
+        for i, name in enumerate(all_ordered):
             p = providers[name]
             display = p.get("display_name", name)
+            is_installed = p.get("installed", False)
             authed = p.get("authenticated", False)
             auth_detail = p.get("auth_detail", "")
+            is_installing = self._cli_installing == name
 
-            # Provider name
+            # Provider name with selection cursor
             if i == self._cli_selected:
                 self._put(stdscr, y, lbl_col, f"  \u25b8 {i+1}.", self._cyan() | self._bold())
                 self._put(stdscr, y, lbl_col + 7, display, self._cyan() | self._bold())
             else:
                 self._put(stdscr, y, lbl_col + 4, f"{i+1}.", self._dim())
-                self._put(stdscr, y, lbl_col + 7, display)
+                name_attr = 0 if is_installed else self._dim()
+                self._put(stdscr, y, lbl_col + 7, display, name_attr)
 
-            # Auth status
-            auth_x = lbl_col + 7 + len(display) + 2
-            if authed:
-                self._put(stdscr, y, auth_x, "\u25cf", self._green())
-                detail_str = auth_detail[:bar_w - auth_x - col + 2] if auth_detail else "Authenticated"
-                self._put(stdscr, y, auth_x + 2, detail_str, self._dim())
+            # Status indicator
+            status_x = lbl_col + 7 + len(display) + 2
+            if is_installing:
+                self._put(stdscr, y, status_x, "\u25cf", self._yellow())
+                self._put(stdscr, y, status_x + 2, "Installing...", self._yellow())
+            elif not is_installed:
+                self._put(stdscr, y, status_x, "\u25cb", self._dim())
+                self._put(stdscr, y, status_x + 2, "Not installed", self._dim())
+                self._put(stdscr, y, status_x + 16, "[I]", self._cyan())
+            elif authed:
+                self._put(stdscr, y, status_x, "\u25cf", self._green())
+                detail_str = auth_detail[:bar_w - status_x - col + 2] if auth_detail else "Authenticated"
+                self._put(stdscr, y, status_x + 2, detail_str, self._dim())
             else:
-                self._put(stdscr, y, auth_x, "\u25cb", self._red())
-                self._put(stdscr, y, auth_x + 2, "Not signed in", self._dim())
+                self._put(stdscr, y, status_x, "\u25cb", self._red())
+                self._put(stdscr, y, status_x + 2, "Not signed in", self._dim())
             y += 1
-
-        if not_installed:
-            y += 1
-            self._put(stdscr, y, lbl_col, "Not installed:", self._dim())
-            y += 1
-            for name in not_installed:
-                p = providers[name]
-                hint = p.get("install_hint", "")
-                self._put(stdscr, y, lbl_col + 2, f"{p.get('display_name', name)}", self._dim())
-                if hint:
-                    self._put(stdscr, y, lbl_col + 2 + len(p.get('display_name', name)) + 2, hint, self._dim())
-                y += 1
 
         y += 1
         self._hline(stdscr, y, col, bar_w)
@@ -1068,8 +1079,11 @@ class RelayTUI:
         self._put(stdscr, y, x, "[S]", self._cyan() | self._bold())
         self._put(stdscr, y, x + 4, "Sign in", self._dim())
         x += 13
+        self._put(stdscr, y, x, "[I]", self._cyan() | self._bold())
+        self._put(stdscr, y, x + 4, "Install", self._dim())
+        x += 13
         self._put(stdscr, y, x, "[Esc]", self._cyan() | self._bold())
-        self._put(stdscr, y, x + 6, "Cancel", self._dim())
+        self._put(stdscr, y, x + 6, "Back", self._dim())
 
     def _draw_auth(self, stdscr, y, col, bar_w):
         s = self.state

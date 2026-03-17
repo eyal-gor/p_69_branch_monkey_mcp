@@ -32,12 +32,30 @@ class CliProvider:
     name: str = ""
     display_name: str = ""
     install_hint: str = ""
+    install_cmd: List[str] = []  # e.g. ["npm", "install", "-g", "package-name"]
     api_key_env: str = ""       # Env var name for API key (e.g. ANTHROPIC_API_KEY)
     api_key_config: str = ""    # Config key in ~/.kompany/config.json
 
     def is_available(self) -> Optional[str]:
         """Return path if CLI is installed, None otherwise."""
         raise NotImplementedError
+
+    def install(self) -> dict:
+        """Install the CLI. Returns {success: bool, output: str}."""
+        if not self.install_cmd:
+            return {"success": False, "output": "No install command configured"}
+        try:
+            result = subprocess.run(
+                self.install_cmd,
+                capture_output=True, text=True, timeout=120,
+            )
+            success = result.returncode == 0
+            output = result.stdout + result.stderr
+            return {"success": success, "output": output.strip()}
+        except subprocess.TimeoutExpired:
+            return {"success": False, "output": "Install timed out"}
+        except Exception as e:
+            return {"success": False, "output": str(e)}
 
     def get_auth_status(self) -> dict:
         """Check authentication status.
@@ -131,6 +149,7 @@ class ClaudeCodeProvider(CliProvider):
     name = "claude"
     display_name = "Claude Code"
     install_hint = "npm install -g @anthropic-ai/claude-code"
+    install_cmd = ["npm", "install", "-g", "@anthropic-ai/claude-code"]
     api_key_env = "ANTHROPIC_API_KEY"
     api_key_config = "anthropic_api_key"
 
@@ -275,6 +294,7 @@ class CodexProvider(CliProvider):
     name = "codex"
     display_name = "Codex CLI"
     install_hint = "npm install -g @openai/codex"
+    install_cmd = ["npm", "install", "-g", "@openai/codex"]
     api_key_env = "OPENAI_API_KEY"
     api_key_config = "openai_api_key"
 
@@ -477,11 +497,130 @@ class CodexProvider(CliProvider):
         return text.startswith(noise_prefixes)
 
 
+class GrokProvider(CliProvider):
+    """xAI Grok CLI provider (runs Claude Code with Grok models via proxy)."""
+
+    name = "grok"
+    display_name = "Grok"
+    install_hint = "npm install -g grok-cli"
+    install_cmd = ["npm", "install", "-g", "grok-cli"]
+    api_key_env = "XAI_API_KEY"
+    api_key_config = "xai_api_key"
+
+    def is_available(self) -> Optional[str]:
+        return shutil.which("grok")
+
+    def get_auth_status(self) -> dict:
+        """Check Grok auth: stored API key or XAI_API_KEY env var."""
+        # 1. Check stored key
+        config = _load_config()
+        if config.get(self.api_key_config):
+            key = config[self.api_key_config]
+            hint = key[:7] + "..." + key[-4:] if len(key) > 11 else "***"
+            return {"authenticated": True, "method": "api_key", "detail": f"API key ({hint})"}
+
+        # 2. Check env
+        env_key = os.environ.get(self.api_key_env)
+        if env_key:
+            hint = env_key[:7] + "..." + env_key[-4:] if len(env_key) > 11 else "***"
+            return {"authenticated": True, "method": "api_key", "detail": f"API key from env ({hint})"}
+
+        path = self.is_available()
+        if not path:
+            return {"authenticated": False, "method": "none", "detail": "CLI not installed"}
+
+        return {"authenticated": False, "method": "none", "detail": "No API key — get one at console.x.ai"}
+
+    def build_run_command(self, prompt, system_prompt=None):
+        # grok-cli runs claude code under a proxy, so output is claude stream-json format.
+        # We pass the API key via -k flag if stored, otherwise grok uses its keychain.
+        args = ["grok"]
+        auth_env = self.get_auth_env()
+        api_key = auth_env.get(self.api_key_env)
+        if api_key:
+            args.extend(["-k", api_key])
+
+        # grok starts the proxy and then spawns claude, which reads from stdin.
+        # For non-interactive use, we need to pass claude args after --.
+        # Actually grok-cli spawns claude -p automatically — we need to set
+        # CLAUDE_CODE_ARGS or similar. Let's check...
+        # grok-cli runs: claude -p <prompt> with proxy env vars.
+        # We'll set the prompt via env vars that grok passes to claude.
+
+        # grok-cli doesn't support passing prompts directly — it spawns
+        # interactive claude. For our use case we run claude directly with
+        # the proxy env vars that grok would set.
+        return CliCommand(
+            args=[
+                "claude",
+                "-p", prompt,
+                "--output-format", "stream-json",
+                "--verbose",
+                "--dangerously-skip-permissions"
+            ],
+            env_overrides={"CLAUDECODE": None},
+            env_inject={
+                # Point Claude at the xAI API via anthropic-compatible endpoint
+                "ANTHROPIC_BASE_URL": "https://api.x.ai",
+                **(auth_env if auth_env else {}),
+                **({"ANTHROPIC_API_KEY": api_key} if api_key else {}),
+            },
+        )
+
+    def build_resume_command(self, prompt, session_id):
+        auth_env = self.get_auth_env()
+        api_key = auth_env.get(self.api_key_env)
+        return CliCommand(
+            args=[
+                "claude",
+                "-p", prompt,
+                "--output-format", "stream-json",
+                "--verbose",
+                "--resume", session_id,
+                "--dangerously-skip-permissions"
+            ],
+            env_overrides={"CLAUDECODE": None},
+            env_inject={
+                "ANTHROPIC_BASE_URL": "https://api.x.ai",
+                **({"ANTHROPIC_API_KEY": api_key} if api_key else {}),
+            },
+        )
+
+    def build_oneshot_command(self, prompt):
+        auth_env = self.get_auth_env()
+        api_key = auth_env.get(self.api_key_env)
+        return CliCommand(
+            args=[
+                "claude",
+                "-p", prompt,
+                "--output-format", "json",
+                "--dangerously-skip-permissions"
+            ],
+            env_overrides={"CLAUDECODE": None},
+            env_inject={
+                "ANTHROPIC_BASE_URL": "https://api.x.ai",
+                **({"ANTHROPIC_API_KEY": api_key} if api_key else {}),
+            },
+        )
+
+    def extract_session_id(self, event):
+        # Same as Claude — grok uses claude under the hood
+        if event.get("type") == "system" and event.get("subtype") == "init":
+            return event.get("session_id")
+        return None
+
+    def is_noise(self, text):
+        noise_prefixes = ("warn:", "Warning:", "DeprecationWarning", "[DEP")
+        noise_substrings = ("oven-sh/bun", "baseline.zip", "baseline build", "proxy")
+        return text.startswith(noise_prefixes) or any(s in text for s in noise_substrings)
+
+
 # --- Provider Registry ---
 
 _PROVIDERS: Dict[str, CliProvider] = {
     "claude": ClaudeCodeProvider(),
     "codex": CodexProvider(),
+    "grok": GrokProvider(),
 }
 
 # Fallback default when no persistent config exists

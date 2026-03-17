@@ -1438,6 +1438,32 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
 
     tui._on_cli_device_auth = on_cli_device_auth
 
+    # Callback to install a CLI provider (runs in background thread)
+    def on_cli_install(provider_name):
+        import threading
+
+        def _run():
+            try:
+                from .bridge_and_local_actions.cli_providers import get_provider, get_available_providers
+                provider = get_provider(provider_name)
+                tui._cli_installing = provider_name
+                print(f"[Relay] Installing {provider.display_name}...")
+                result = provider.install()
+                tui._cli_installing = None
+                if result["success"]:
+                    print(f"[Relay] {provider.display_name} installed successfully")
+                else:
+                    print(f"[Relay] Install failed: {result['output']}")
+                # Refresh providers
+                tui.update(cli_providers=get_available_providers())
+            except Exception as e:
+                tui._cli_installing = None
+                print(f"[Relay] Install failed: {e}")
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    tui._on_cli_install = on_cli_install
+
     # Callback to refresh CLI provider status (after auth changes)
     def on_cli_refresh():
         try:
@@ -1770,8 +1796,8 @@ def main():
     parser.add_argument(
         "--cli",
         default=None,
-        choices=["claude", "codex"],
-        help="Set default AI CLI provider (claude or codex)"
+        choices=["claude", "codex", "grok"],
+        help="Set default AI CLI provider (claude, codex, or grok)"
     )
 
     args = parser.parse_args()

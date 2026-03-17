@@ -41,6 +41,11 @@ class CliDeviceAuthRequest(BaseModel):
     cli_tool: str
 
 
+class CliInstallRequest(BaseModel):
+    """Request to install a CLI provider."""
+    cli_tool: str
+
+
 @router.get("/config/working-directory")
 def get_working_directory():
     """Get the home and current project directory for agent execution."""
@@ -187,6 +192,35 @@ def start_cli_device_auth(request: CliDeviceAuthRequest):
         "status": "ok",
         "cli_tool": request.cli_tool,
         **result,
+    }
+
+
+@router.post("/config/cli/install")
+def install_cli(request: CliInstallRequest):
+    """Install a CLI provider via npm."""
+    try:
+        provider = get_provider(request.cli_tool)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if provider.is_available():
+        return {
+            "status": "ok",
+            "cli_tool": request.cli_tool,
+            "message": f"{provider.display_name} is already installed",
+            "already_installed": True,
+        }
+
+    result = provider.install()
+    if not result["success"]:
+        raise HTTPException(status_code=500, detail=result["output"])
+
+    return {
+        "status": "ok",
+        "cli_tool": request.cli_tool,
+        "message": f"{provider.display_name} installed successfully",
+        "output": result["output"],
+        "providers": get_available_providers(),
     }
 
 
