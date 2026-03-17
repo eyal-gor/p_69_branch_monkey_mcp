@@ -412,13 +412,13 @@ class CodexProvider(CliProvider):
         )
 
     def build_resume_command(self, prompt, session_id):
+        # Codex syntax: codex exec resume <session_id> <prompt> --full-auto --json
         return CliCommand(
             args=[
                 "codex",
-                "exec", prompt,
+                "exec", "resume", session_id, prompt,
                 "--full-auto",
                 "--json",
-                "--resume", session_id,
             ],
             env_overrides={},
             env_inject=self.get_auth_env(),
