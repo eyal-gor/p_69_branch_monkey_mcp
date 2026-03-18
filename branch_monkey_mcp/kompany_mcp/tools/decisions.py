@@ -63,7 +63,10 @@ def kompany_decision_list(status: str = None) -> str:
                 output += f"   Options: {', '.join(labels)}\n"
 
             if d.get("resolved_option"):
-                output += f"   Resolved: {d['resolved_option']} at {d.get('resolved_at', 'unknown')}\n"
+                resolved_info = f"   Resolved: {d['resolved_option']} at {d.get('resolved_at', 'unknown')}"
+                if d.get("resolved_by_type"):
+                    resolved_info += f" by {d['resolved_by_type']}"
+                output += resolved_info + "\n"
 
             output += "\n"
 
@@ -188,6 +191,8 @@ def kompany_decision_update(
     agent_id: str = None,
     task_id: str = None,
     blocks: str = None,
+    resolved_by: str = None,
+    resolved_by_type: str = None,
 ) -> str:
     """Update an existing decision.
 
@@ -203,6 +208,8 @@ def kompany_decision_update(
         status: New status (pending, approved, rejected, dismissed)
         agent_id: Agent to trigger on approval (set to "none" to clear)
         task_id: Linked task ID (set to "none" to clear)
+        resolved_by: UUID of user or agent that resolved this decision
+        resolved_by_type: "user" or "agent"
         blocks: JSON string of display blocks array (replaces all blocks).
             Each block has {type, data}. Supported types:
             - social_post: {platform, title, body, status, ...}
@@ -235,6 +242,10 @@ def kompany_decision_update(
             data["agent_id"] = None if agent_id == "none" else agent_id
         if task_id is not None:
             data["task_id"] = None if task_id == "none" else task_id
+        if resolved_by is not None:
+            data["resolved_by"] = resolved_by
+        if resolved_by_type is not None:
+            data["resolved_by_type"] = resolved_by_type
         if blocks is not None:
             try:
                 data["blocks"] = _json.loads(blocks)
@@ -287,7 +298,10 @@ def kompany_decision_check(decision_id: str) -> str:
         if status == "pending":
             output += "\nThe user has not responded yet."
         elif d.get("resolved_option"):
-            output += f"\nResolved with: **{d['resolved_option']}** at {d.get('resolved_at', 'unknown')}"
+            resolved_str = f"\nResolved with: **{d['resolved_option']}** at {d.get('resolved_at', 'unknown')}"
+            if d.get("resolved_by_type"):
+                resolved_str += f" (by {d['resolved_by_type']}: `{d.get('resolved_by', '?')}`)"
+            output += resolved_str
         else:
             output += f"\nResolved at {d.get('resolved_at', 'unknown')}"
 
