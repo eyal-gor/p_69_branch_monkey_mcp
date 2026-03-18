@@ -725,11 +725,17 @@ def set_default_cli(name: str):
 
 
 def get_provider(name: Optional[str] = None) -> CliProvider:
-    """Get a CLI provider by name. Falls back to default."""
+    """Get a CLI provider by name. Falls back to default, then to claude."""
     name = name or get_default_cli()
     provider = _PROVIDERS.get(name)
     if not provider:
         raise ValueError(f"Unknown CLI provider: {name}. Available: {list(_PROVIDERS.keys())}")
+    # If the resolved provider isn't installed, fall back to claude
+    if not provider.is_available() and name != _FALLBACK_CLI:
+        fallback = _PROVIDERS.get(_FALLBACK_CLI)
+        if fallback and fallback.is_available():
+            print(f"[CliProviders] {provider.display_name} not installed, falling back to {fallback.display_name}")
+            return fallback
     return provider
 
 
