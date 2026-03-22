@@ -1313,10 +1313,7 @@ class RelayTUI:
             free = max(0.0, 100.0 - value)
             label = f"{free:.0f}% free"
         bar = self._usage_bar((value / scale_max) * 100 if scale_max else value)
-        spark = self._sparkline(self._metric_history.get(metric, []))
         parts = [f"{label:>8}", bar]
-        if spark:
-            parts.append(spark[-8:])
         if suffix:
             parts.append(suffix)
         return "  ".join(parts)
