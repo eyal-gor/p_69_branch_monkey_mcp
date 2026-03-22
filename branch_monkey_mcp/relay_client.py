@@ -998,7 +998,21 @@ class RelayClient:
             except asyncio.CancelledError:
                 break
             except Exception:
-                self._tui_update(server_running=False)
+                # Local server down — still collect basic compute stats
+                try:
+                    import shutil, os as _os
+                    cpu_count = _os.cpu_count() or 1
+                    load1, _, _ = _os.getloadavg()
+                    disk = shutil.disk_usage("/")
+                    fallback_compute = {
+                        "cpu_percent": round((load1 / cpu_count) * 100, 1),
+                        "memory": {},
+                        "load": {"one": round(load1, 2), "normalized_percent": round((load1 / cpu_count) * 100, 1)},
+                        "disk": {"percent": round((disk.used / disk.total) * 100, 1), "free_bytes": disk.free, "total_bytes": disk.total},
+                    }
+                    self._tui_update(server_running=False, compute=fallback_compute)
+                except Exception:
+                    self._tui_update(server_running=False)
 
     async def _unregister_machine(self):
         """Mark compute node as offline."""
