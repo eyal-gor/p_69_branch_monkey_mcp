@@ -22,6 +22,23 @@ Add this to your project's `.mcp.json`:
 
 Restart Claude Code. On first use, a browser will open for you to log in and approve the device.
 
+## Using It With Codex
+
+Codex does not consume MCP servers the same way Claude Code does, so the integration path is different:
+
+- Use the local bridge and workflow CLI instead of `.mcp.json`
+- Set the default CLI provider to `codex`
+- Authenticate Codex via `OPENAI_API_KEY` or `codex login`
+- Keep the MCP server as an optional adapter for Claude Code
+
+In this repo, the non-MCP path already exists:
+
+- The Kompany API logic is plain Python/HTTP, not MCP-specific
+- The local agent server supports `cli_tool: "codex"`
+- `kompany-workflow llm` can route prompts through the selected CLI provider
+
+That means the practical Codex adaptation is: treat MCP as one frontend, not the core architecture.
+
 ## Features
 
 - **No API key needed** - Authenticates via browser approval

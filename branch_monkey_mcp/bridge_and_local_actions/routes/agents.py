@@ -6,7 +6,11 @@ import asyncio
 import base64
 import json
 import os
+import sys
 import tempfile
+import threading
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -17,6 +21,99 @@ from ..config import get_default_working_dir
 from ..agent_manager import agent_manager
 
 router = APIRouter()
+
+
+_WORKFLOW_RETENTION = timedelta(hours=6)
+_workflow_lock = threading.Lock()
+_workflow_runs: dict[str, dict] = {}
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _cleanup_workflows() -> None:
+    cutoff = _utc_now() - _WORKFLOW_RETENTION
+    stale_ids = []
+    for workflow_id, run in _workflow_runs.items():
+        finished_at = run.get("finished_at")
+        if finished_at and finished_at < cutoff:
+            stale_ids.append(workflow_id)
+
+    for workflow_id in stale_ids:
+        _workflow_runs.pop(workflow_id, None)
+
+
+def _start_workflow_run(name: str, working_dir: str) -> str:
+    workflow_id = uuid.uuid4().hex[:8]
+    with _workflow_lock:
+        _cleanup_workflows()
+        _workflow_runs[workflow_id] = {
+            "id": workflow_id,
+            "name": name,
+            "working_dir": working_dir,
+            "status": "running",
+            "started_at": _utc_now(),
+            "finished_at": None,
+            "resume_from": None,
+            "error": None,
+        }
+    return workflow_id
+
+
+def _finish_workflow_run(workflow_id: str, workflow_result: dict) -> None:
+    with _workflow_lock:
+        run = _workflow_runs.get(workflow_id)
+        if not run:
+            return
+
+        status = workflow_result.get("status", "error")
+        run["status"] = "paused" if status == "needs_approval" else status
+        run["finished_at"] = _utc_now()
+        run["resume_from"] = workflow_result.get("resume_from")
+        run["error"] = workflow_result.get("error")
+
+
+def get_workflow_summary() -> dict:
+    with _workflow_lock:
+        _cleanup_workflows()
+        counts = {
+            "running": 0,
+            "paused": 0,
+            "completed": 0,
+            "failed": 0,
+            "error": 0,
+        }
+
+        for run in _workflow_runs.values():
+            status = run.get("status", "error")
+            if status in counts:
+                counts[status] += 1
+            else:
+                counts["error"] += 1
+
+        recent = sorted(
+            _workflow_runs.values(),
+            key=lambda run: run.get("started_at") or datetime.min.replace(tzinfo=timezone.utc),
+            reverse=True,
+        )[:10]
+
+        def _serialize(run: dict) -> dict:
+            return {
+                "id": run["id"],
+                "name": run["name"],
+                "working_dir": run["working_dir"],
+                "status": run["status"],
+                "started_at": run["started_at"].isoformat() if run.get("started_at") else None,
+                "finished_at": run["finished_at"].isoformat() if run.get("finished_at") else None,
+                "resume_from": run.get("resume_from"),
+                "error": run.get("error"),
+            }
+
+        return {
+            "counts": counts,
+            "runs": [_serialize(run) for run in recent],
+        }
 
 
 class CreateAgentRequest(BaseModel):
@@ -263,6 +360,7 @@ async def run_workflow(request: RunWorkflowRequest):
 
     # Get the workflow YAML
     yaml_content = request.workflow_yaml
+    workflow_name = request.agent_name or "workflow"
     if not yaml_content:
         yaml_content = _build_default_yaml(
             request.machine_id,
@@ -286,6 +384,7 @@ async def run_workflow(request: RunWorkflowRequest):
 
     print(f"[RunWorkflow] Running: {' '.join(cmd)}")
     print(f"[RunWorkflow] Working dir: {working_dir}")
+    workflow_id = _start_workflow_run(workflow_name, working_dir)
 
     try:
         result = sp.run(
@@ -308,6 +407,8 @@ async def run_workflow(request: RunWorkflowRequest):
                 "stdout": result.stdout[-2000:] if result.stdout else "",
                 "stderr": result.stderr[-2000:] if result.stderr else "",
             }
+
+        _finish_workflow_run(workflow_id, workflow_result)
 
         # Save run history to cloud API
         callback_dict = request.callback.model_dump() if request.callback else {}
@@ -358,10 +459,12 @@ async def run_workflow(request: RunWorkflowRequest):
         }
 
     except sp.TimeoutExpired:
+        _finish_workflow_run(workflow_id, {"status": "error", "error": "Workflow timed out after 600s"})
         if os.path.exists(workflow_file):
             os.unlink(workflow_file)
         return {"success": False, "workflow": {"status": "error", "error": "Workflow timed out after 600s"}}
     except Exception as e:
+        _finish_workflow_run(workflow_id, {"status": "error", "error": str(e)})
         if os.path.exists(workflow_file):
             os.unlink(workflow_file)
         raise HTTPException(status_code=500, detail=str(e))
@@ -558,6 +661,138 @@ def get_machine_stats():
 
     # Get agents (fast - in memory)
     agents = agent_manager.list()
+    agent_counts = {
+        "running": 0,
+        "paused": 0,
+        "prepared": 0,
+        "completed": 0,
+        "failed": 0,
+    }
+    for agent in agents:
+        status = agent.get("status")
+        if status in agent_counts:
+            agent_counts[status] += 1
+
+    workflow_summary = get_workflow_summary()
+
+    def _safe_run(cmd: list[str]) -> Optional[str]:
+        try:
+            import subprocess as sp
+
+            result = sp.run(cmd, capture_output=True, text=True, timeout=2)
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except Exception:
+            return None
+        return None
+
+    def _get_cpu_percent() -> Optional[float]:
+        output = _safe_run(["ps", "-A", "-o", "%cpu="])
+        if not output:
+            return None
+        total = 0.0
+        for line in output.splitlines():
+            try:
+                total += float(line.strip())
+            except ValueError:
+                continue
+        cpu_count = os.cpu_count() or 1
+        return round(min(max(total / cpu_count, 0.0), 999.0), 1)
+
+    def _get_memory_stats() -> dict:
+        total_bytes = None
+        used_bytes = None
+        system = sys.platform
+
+        if system == "darwin":
+            total_raw = _safe_run(["sysctl", "-n", "hw.memsize"])
+            page_size_raw = _safe_run(["sysctl", "-n", "hw.pagesize"])
+            vm_stat_raw = _safe_run(["vm_stat"])
+            try:
+                total_bytes = int(total_raw) if total_raw else None
+                page_size = int(page_size_raw) if page_size_raw else 4096
+                if vm_stat_raw and total_bytes:
+                    pages = {}
+                    for line in vm_stat_raw.splitlines():
+                        if ":" not in line:
+                            continue
+                        key, value = line.split(":", 1)
+                        value = value.strip().rstrip(".")
+                        value = value.replace(".", "").strip()
+                        try:
+                            pages[key.strip()] = int(value)
+                        except ValueError:
+                            continue
+                    available_pages = (
+                        pages.get("Pages free", 0)
+                        + pages.get("Pages inactive", 0)
+                        + pages.get("Pages speculative", 0)
+                    )
+                    used_bytes = max(total_bytes - (available_pages * page_size), 0)
+            except Exception:
+                pass
+        elif os.path.exists("/proc/meminfo"):
+            try:
+                meminfo = {}
+                with open("/proc/meminfo") as f:
+                    for line in f:
+                        key, value = line.split(":", 1)
+                        meminfo[key] = int(value.strip().split()[0]) * 1024
+                total_bytes = meminfo.get("MemTotal")
+                available = meminfo.get("MemAvailable")
+                if total_bytes and available is not None:
+                    used_bytes = max(total_bytes - available, 0)
+            except Exception:
+                pass
+
+        percent = None
+        if total_bytes and used_bytes is not None:
+            percent = round((used_bytes / total_bytes) * 100, 1)
+
+        return {
+            "total_bytes": total_bytes,
+            "used_bytes": used_bytes,
+            "percent": percent,
+        }
+
+    def _get_disk_stats(path: Optional[str]) -> dict:
+        try:
+            import shutil
+
+            target = path or get_default_working_dir()
+            usage = shutil.disk_usage(target)
+            return {
+                "path": target,
+                "free_bytes": usage.free,
+                "total_bytes": usage.total,
+                "used_bytes": usage.used,
+                "percent": round((usage.used / usage.total) * 100, 1) if usage.total else None,
+            }
+        except Exception:
+            return {
+                "path": path or get_default_working_dir(),
+                "free_bytes": None,
+                "total_bytes": None,
+                "used_bytes": None,
+                "percent": None,
+            }
+
+    cpu_count = os.cpu_count() or 1
+    try:
+        load1, load5, load15 = os.getloadavg()
+        load = {
+            "one": round(load1, 2),
+            "five": round(load5, 2),
+            "fifteen": round(load15, 2),
+            "normalized_percent": round((load1 / cpu_count) * 100, 1),
+        }
+    except Exception:
+        load = {
+            "one": None,
+            "five": None,
+            "fifteen": None,
+            "normalized_percent": None,
+        }
 
     # Get worktrees (may be slower due to git commands)
     try:
@@ -577,6 +812,15 @@ def get_machine_stats():
 
     return {
         "agents": agents,
+        "agent_counts": agent_counts,
+        "workflow_summary": workflow_summary,
         "worktrees": worktrees,
-        "home_directory": home_dir
+        "home_directory": home_dir,
+        "compute": {
+            "cpu_percent": _get_cpu_percent(),
+            "cpu_count": cpu_count,
+            "memory": _get_memory_stats(),
+            "load": load,
+            "disk": _get_disk_stats(home_dir or get_default_working_dir()),
+        },
     }

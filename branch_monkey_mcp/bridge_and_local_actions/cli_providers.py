@@ -103,6 +103,7 @@ class CliProvider:
         self,
         prompt: str,
         system_prompt: Optional[str] = None,
+        use_mcp: bool = False,
     ) -> CliCommand:
         """Build command for one-shot text output (no streaming JSON).
         Used by kompany-workflow llm for clean text responses."""
@@ -438,7 +439,7 @@ class CodexProvider(CliProvider):
         f.close()
         return f.name
 
-    def build_text_command(self, prompt, system_prompt=None):
+    def build_text_command(self, prompt, system_prompt=None, use_mcp=False):
         prompt_file = self._write_prompt_file(prompt, system_prompt)
         import tempfile
         out_file = tempfile.mktemp(suffix='.txt', prefix='codex-out-')
@@ -662,7 +663,7 @@ class GrokProvider(CliProvider):
         # the proxy env vars that grok would set.
         return self._grok_cli_command(prompt, "stream-json", auth_env, api_key)
 
-    def build_text_command(self, prompt, system_prompt=None):
+    def build_text_command(self, prompt, system_prompt=None, use_mcp=False):
         auth_env = self.get_auth_env()
         api_key = auth_env.get(self.api_key_env)
         return self._grok_cli_command(prompt, "text", auth_env, api_key, system_prompt)

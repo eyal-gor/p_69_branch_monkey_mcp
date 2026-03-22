@@ -178,6 +178,7 @@ class RelayClient:
         self._reconnect_task: Optional[asyncio.Task] = None
         self._health_check_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._local_stats_task: Optional[asyncio.Task] = None
         self._background_tasks: set = set()
         self._do_reconnect_attempts = 0
         self._auth_refreshing = False
@@ -821,6 +822,7 @@ class RelayClient:
         # Start background tasks
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         self._health_check_task = asyncio.create_task(self._health_check_loop())
+        self._local_stats_task = asyncio.create_task(self._local_stats_loop())
 
         try:
             # Keep running until stopped
@@ -846,6 +848,8 @@ class RelayClient:
                 self._heartbeat_task.cancel()
             if self._health_check_task:
                 self._health_check_task.cancel()
+            if self._local_stats_task:
+                self._local_stats_task.cancel()
             if self._reconnect_task:
                 self._reconnect_task.cancel()
 
@@ -856,7 +860,7 @@ class RelayClient:
             self._background_tasks.clear()
 
             # Wait for tasks to finish
-            tasks = [t for t in [self._heartbeat_task, self._health_check_task] if t]
+            tasks = [t for t in [self._heartbeat_task, self._health_check_task, self._local_stats_task] if t]
             if tasks:
                 try:
                     await asyncio.gather(*tasks, return_exceptions=True)
@@ -971,6 +975,30 @@ class RelayClient:
                 )
         except Exception:
             pass  # Local server might not support this yet
+
+    async def _local_stats_loop(self):
+        """Poll the local bridge for workload and compute stats."""
+        while self._running:
+            try:
+                await asyncio.sleep(5)
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(
+                        f"http://127.0.0.1:{self.local_port}/api/local-claude/stats",
+                        timeout=5,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+
+                self._tui_update(
+                    server_running=True,
+                    agent_counts=data.get("agent_counts", {}),
+                    workflow_summary=data.get("workflow_summary", {}),
+                    compute=data.get("compute", {}),
+                )
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                self._tui_update(server_running=False)
 
     async def _unregister_machine(self):
         """Mark compute node as offline."""

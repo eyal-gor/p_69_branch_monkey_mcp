@@ -97,6 +97,10 @@ class RelayTUI:
             "cli_providers": {},  # {name: {display_name, installed, ...}}
             "default_cli": "claude",
             "cli_prompt": None,  # None=don't show, "pending"=showing, "done"=answered
+            "agent_counts": {},
+            "workflow_summary": {},
+            "compute": {},
+            "compute_health": None,
         }
         self._stdout_capture = LogCapture(sys.stdout)
         self._stderr_capture = LogCapture(sys.stderr)
@@ -130,6 +134,13 @@ class RelayTUI:
         self._on_cli_refresh = None  # Callback() -> refreshes provider state
         self._cli_installing = None  # Name of provider being installed
         self._verbose = False
+        self._history_len = 36
+        self._metric_history = {
+            "cpu": deque(maxlen=self._history_len),
+            "memory": deque(maxlen=self._history_len),
+            "load": deque(maxlen=self._history_len),
+            "disk": deque(maxlen=self._history_len),
+        }
 
     def install_capture(self):
         """Redirect stdout/stderr to capture logs."""
@@ -144,6 +155,10 @@ class RelayTUI:
     def update(self, **kwargs):
         """Update state dict (thread-safe for simple dict updates)."""
         self.state.update(kwargs)
+        compute = kwargs.get("compute")
+        if compute:
+            self._record_compute_history(compute)
+            self.state["compute_health"] = self._get_compute_health(compute)
 
     def run(self, stop_callback: Optional[Callable] = None):
         """Run the TUI. Blocks until user quits."""
@@ -594,10 +609,30 @@ class RelayTUI:
                 y += 1
         y += 1
 
-        # Stats
-        self._put(stdscr, y, lbl_col, "STATS", self._dim())
+        # Workload
+        self._put(stdscr, y, lbl_col, "WORKLOAD", self._dim())
         y += 1
         self._hline(stdscr, y, col, bar_w)
+        y += 1
+
+        agent_counts = s.get("agent_counts", {})
+        self._put(stdscr, y, lbl_col, "Agents", self._dim())
+        self._put(
+            stdscr,
+            y,
+            val_col,
+            f"{agent_counts.get('running', 0)} run  {agent_counts.get('paused', 0)} paused  {agent_counts.get('prepared', 0)} ready",
+        )
+        y += 1
+
+        workflow_counts = (s.get("workflow_summary") or {}).get("counts", {})
+        self._put(stdscr, y, lbl_col, "Workflows", self._dim())
+        self._put(
+            stdscr,
+            y,
+            val_col,
+            f"{workflow_counts.get('running', 0)} run  {workflow_counts.get('paused', 0)} paused",
+        )
         y += 1
 
         self._put(stdscr, y, lbl_col, "Uptime", self._dim())
@@ -612,6 +647,36 @@ class RelayTUI:
         self._put(stdscr, y, lbl_col, "Requests", self._dim())
         self._put(stdscr, y, val_col, str(s.get("requests_handled", 0)))
         y += 2
+
+        # Compute
+        self._put(stdscr, y, lbl_col, "COMPUTE", self._dim())
+        y += 1
+        self._hline(stdscr, y, col, bar_w)
+        y += 1
+
+        compute = s.get("compute", {})
+        self._put(stdscr, y, lbl_col, "Overall", self._dim())
+        health_text, health_attr = self._format_compute_health(compute)
+        self._put(stdscr, y, val_col, health_text, health_attr)
+        y += 1
+
+        self._put(stdscr, y, lbl_col, "CPU", self._dim())
+        self._put(stdscr, y, val_col, self._format_metric_line("cpu", compute.get("cpu_percent"), 100))
+        y += 1
+
+        self._put(stdscr, y, lbl_col, "Memory", self._dim())
+        self._put(stdscr, y, val_col, self._format_metric_line("memory", (compute.get("memory", {}) or {}).get("percent"), 100))
+        y += 1
+
+        self._put(stdscr, y, lbl_col, "Load", self._dim())
+        load_pct = (compute.get("load", {}) or {}).get("normalized_percent")
+        self._put(stdscr, y, val_col, self._format_metric_line("load", load_pct, 100, suffix=self._format_load(compute)))
+        y += 1
+
+        self._put(stdscr, y, lbl_col, "Disk", self._dim())
+        self._put(stdscr, y, val_col, self._format_metric_line("disk", (compute.get("disk", {}) or {}).get("percent"), 100, invert_label=True, suffix=self._format_disk_free(compute.get("disk", {}))))
+        y += 1
+        y += 1
 
         # Recent log lines
         self._put(stdscr, y, lbl_col, "RECENT", self._dim())
@@ -1181,3 +1246,115 @@ class RelayTUI:
         hours = total // 3600
         minutes = (total % 3600) // 60
         return f"{hours}h {minutes}m"
+
+    def _format_bytes(self, value) -> str:
+        if value is None:
+            return "\u2014"
+        units = ["B", "KB", "MB", "GB", "TB"]
+        size = float(value)
+        for unit in units:
+            if size < 1024 or unit == units[-1]:
+                if unit == "B":
+                    return f"{int(size)} {unit}"
+                return f"{size:.1f} {unit}"
+            size /= 1024.0
+        return "\u2014"
+
+    def _format_load(self, compute: Dict[str, Any]) -> str:
+        load = compute.get("load", {})
+        one = load.get("one")
+        five = load.get("five")
+        fifteen = load.get("fifteen")
+        if one is None or five is None or fifteen is None:
+            return "\u2014"
+        return f"{one:.2f}  {five:.2f}  {fifteen:.2f}"
+
+    def _format_disk_free(self, disk: Dict[str, Any]) -> str:
+        free = disk.get("free_bytes")
+        total = disk.get("total_bytes")
+        if free is None:
+            return "\u2014"
+        if total is None:
+            return self._format_bytes(free)
+        return f"{self._format_bytes(free)} free"
+
+    def _record_compute_history(self, compute: Dict[str, Any]) -> None:
+        samples = {
+            "cpu": compute.get("cpu_percent"),
+            "memory": (compute.get("memory") or {}).get("percent"),
+            "load": (compute.get("load") or {}).get("normalized_percent"),
+            "disk": (compute.get("disk") or {}).get("percent"),
+        }
+        for key, value in samples.items():
+            if value is not None:
+                self._metric_history[key].append(float(value))
+
+    def _sparkline(self, values) -> str:
+        if not values:
+            return ""
+        chars = "▁▂▃▄▅▆▇█"
+        out = []
+        for value in values:
+            idx = int(max(0, min(len(chars) - 1, round((value / 100) * (len(chars) - 1)))))
+            out.append(chars[idx])
+        return "".join(out)
+
+    def _usage_bar(self, value: Optional[float], width: int = 10) -> str:
+        if value is None:
+            return "[" + ("░" * width) + "]"
+        filled = int(round(max(0, min(100, value)) / 100 * width))
+        return "[" + ("█" * filled) + ("░" * (width - filled)) + "]"
+
+    def _format_metric_line(self, metric: str, value: Optional[float], scale_max: float, invert_label: bool = False, suffix: Optional[str] = None) -> str:
+        if value is None:
+            return "\u2014"
+        label = f"{value:.0f}%"
+        if invert_label:
+            free = max(0.0, 100.0 - value)
+            label = f"{free:.0f}% free"
+        bar = self._usage_bar((value / scale_max) * 100 if scale_max else value)
+        spark = self._sparkline(self._metric_history.get(metric, []))
+        parts = [f"{label:>8}", bar]
+        if spark:
+            parts.append(spark[-8:])
+        if suffix:
+            parts.append(suffix)
+        return "  ".join(parts)
+
+    def _get_compute_health(self, compute: Dict[str, Any]) -> str:
+        cpu = compute.get("cpu_percent")
+        mem = (compute.get("memory") or {}).get("percent")
+        disk = (compute.get("disk") or {}).get("percent")
+        load = (compute.get("load") or {}).get("normalized_percent")
+        active_agents = (self.state.get("agent_counts", {}) or {}).get("running", 0)
+        active_workflows = ((self.state.get("workflow_summary") or {}).get("counts") or {}).get("running", 0)
+
+        if disk is not None and disk >= 92:
+            return "Unhealthy"
+        if mem is not None and mem >= 90:
+            return "Unhealthy"
+        if cpu is not None and cpu >= 90:
+            return "Stressed"
+        if load is not None and load >= 100:
+            return "Stressed"
+        if mem is not None and mem >= 80:
+            return "Stressed"
+        if (active_agents + active_workflows) > 0:
+            if cpu is not None and cpu >= 25:
+                return "Busy"
+            return "Busy"
+        if cpu is None and mem is None and disk is None:
+            return "\u2014"
+        return "Idle"
+
+    def _format_compute_health(self, compute: Dict[str, Any]):
+        health = self.state.get("compute_health") or self._get_compute_health(compute)
+        if health == "Unhealthy":
+            return health, self._red() | self._bold()
+        if health == "Stressed":
+            return health, self._yellow() | self._bold()
+        if health == "Busy":
+            return health, self._cyan() | self._bold()
+        if health == "Idle":
+            return health, self._green() | self._bold()
+        return health, self._dim()
