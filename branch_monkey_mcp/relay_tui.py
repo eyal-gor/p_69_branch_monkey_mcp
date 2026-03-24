@@ -1301,9 +1301,9 @@ class RelayTUI:
 
     def _usage_bar(self, value: Optional[float], width: int = 10) -> str:
         if value is None:
-            return "[" + ("░" * width) + "]"
+            return "[" + ("-" * width) + "]"
         filled = int(round(max(0, min(100, value)) / 100 * width))
-        return "[" + ("█" * filled) + ("░" * (width - filled)) + "]"
+        return "[" + ("#" * filled) + ("-" * (width - filled)) + "]"
 
     def _format_metric_line(self, metric: str, value: Optional[float], scale_max: float, invert_label: bool = False, suffix: Optional[str] = None) -> str:
         if value is None:
