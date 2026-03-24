@@ -139,6 +139,7 @@ class CronCallback(BaseModel):
     agent_name: str = ""
     project_id: str = ""
     user_id: str = ""
+    session_id: Optional[str] = None
 
 
 class RunAgentRequest(BaseModel):
@@ -329,6 +330,7 @@ class RunWorkflowRequest(BaseModel):
     system_prompt: Optional[str] = None
     instructions: Optional[str] = None
     agent_name: Optional[str] = None
+    session_id: Optional[str] = None  # agent_session to write messages to
 
 
 def _build_default_yaml(machine_id: Optional[str], instructions: str, agent_name: str) -> str:
@@ -437,14 +439,26 @@ async def run_workflow(request: RunWorkflowRequest):
 
                 # Handle cron callback
                 if callback_url:
+                    # Collect all step outputs for full workflow transcript
+                    steps = workflow_result.get("steps", [])
+                    full_output = ""
+                    for step in steps:
+                        step_name = step.get("name", "step")
+                        step_stdout = step.get("stdout", "")
+                        if step_stdout:
+                            full_output += f"## {step_name}\n{step_stdout}\n\n"
+                    if not full_output:
+                        full_output = workflow_result.get("steps", [{}])[-1].get("stdout", "")[:4000] if steps else ""
+
                     await client.post(callback_url, json={
                         "cron_id": callback_dict.get("cron_id"),
                         "cron_name": callback_dict.get("cron_name"),
                         "agent_name": callback_dict.get("agent_name"),
                         "project_id": callback_dict.get("project_id"),
                         "user_id": callback_dict.get("user_id"),
+                        "session_id": callback_dict.get("session_id") or (request.session_id if request.session_id else None),
                         "status": "completed" if workflow_result.get("status") == "completed" else "failed",
-                        "output": workflow_result.get("steps", [{}])[-1].get("stdout", "")[:2000] if workflow_result.get("steps") else "",
+                        "output": full_output[:8000],
                     }, headers={"x-cron-secret": callback_dict.get("secret", "")}, timeout=10)
         except Exception as e:
             print(f"[RunWorkflow] Post-run error: {e}")
