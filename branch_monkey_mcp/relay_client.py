@@ -759,14 +759,17 @@ class RelayClient:
                 alive = await self._check_do_alive()
 
                 if alive:
+                    if liveness_failures > 0:
+                        connection_logger.log("do_liveness_recovered", detail=f"After {liveness_failures} failures")
                     liveness_failures = 0
-                    connection_logger.log("do_liveness_ok")
                 else:
                     liveness_failures += 1
                     print(f"[Relay] DO liveness probe failed ({liveness_failures}x)")
 
-                    # 2 consecutive failures → connection is dead, reconnect
-                    if liveness_failures >= 2:
+                    # 4 consecutive failures (2 min) → connection is dead, reconnect
+                    # The websockets library ping/pong catches most real disconnects.
+                    # This is a secondary safety net — no need to be aggressive.
+                    if liveness_failures >= 4:
                         connection_logger.log(
                             "health_check_triggered_reconnect",
                             detail=f"DO liveness failed {liveness_failures}x",
@@ -902,28 +905,31 @@ class RelayClient:
     async def _heartbeat_loop(self):
         """Send periodic heartbeats to cloud API and local server.
 
-        Cloud API failures (500s, timeouts) are logged but do NOT trigger
-        DO reconnection — the liveness probe in _health_check_loop
-        handles actual connection death separately.
+        Cloud API failures do NOT trigger DO reconnection — the heartbeat
+        and DO WebSocket are independent transport paths. DNS failure to
+        kompany.dev says nothing about the WebSocket health.
+        The _health_check_loop handles actual connection death separately.
         """
         consecutive_failures = 0
 
         while self._running:
             try:
-                await asyncio.sleep(25)
+                await asyncio.sleep(60)  # 60s is sufficient — frontend checks every 45s
 
                 if self.connection_state != ConnectionState.CONNECTED:
                     continue
 
                 try:
-                    # Heartbeat to cloud API
+                    # Heartbeat to cloud API (updates compute_nodes table only)
                     await self._cloud_heartbeat("online")
 
                     # Success - reset failure counter
                     self.last_successful_heartbeat = datetime.utcnow()
+                    if consecutive_failures > 0:
+                        connection_logger.log("heartbeat_recovered", detail=f"After {consecutive_failures} failures")
                     consecutive_failures = 0
                     self._tui_update(last_heartbeat=datetime.now(timezone.utc))
-                    connection_logger.log("heartbeat_ok")
+                    # Don't log every success — only log failures and recoveries
 
                 except Exception as e:
                     error_str = str(e)
@@ -945,12 +951,10 @@ class RelayClient:
                     if consecutive_failures <= 3 or consecutive_failures % 10 == 0:
                         print(f"[Relay] Cloud heartbeat failed ({consecutive_failures}x): {e}")
 
-                    # Self-heal: after 7 consecutive failures (~3 min), trigger full reconnect
-                    if consecutive_failures >= 7:
-                        print(f"[Relay] {consecutive_failures} consecutive heartbeat failures — triggering reconnect")
-                        connection_logger.log("heartbeat_triggered_reconnect", detail=f"{consecutive_failures} consecutive failures")
-                        consecutive_failures = 0
-                        await self._trigger_reconnect()
+                    # NOTE: We intentionally do NOT trigger reconnect here.
+                    # Cloud API failures (DNS, 500s) are independent of the
+                    # DO WebSocket connection. The _health_check_loop handles
+                    # actual WebSocket liveness.
 
                 # Heartbeat to local server (so dashboard knows relay is connected)
                 await self._send_local_heartbeat()
@@ -978,9 +982,10 @@ class RelayClient:
 
     async def _local_stats_loop(self):
         """Poll the local bridge for workload and compute stats."""
+        interval = 5 if self.tui else 30  # Fast polling only when TUI is active
         while self._running:
             try:
-                await asyncio.sleep(5)
+                await asyncio.sleep(interval)
                 async with httpx.AsyncClient() as client:
                     response = await client.get(
                         f"http://127.0.0.1:{self.local_port}/api/local-claude/stats",
