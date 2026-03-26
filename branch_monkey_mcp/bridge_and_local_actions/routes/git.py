@@ -10,6 +10,12 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from ...computer_runtime.git_ops import (
+    get_commit_diff as runtime_get_commit_diff,
+    get_git_status_summary,
+    list_recent_commits,
+    resolve_git_root,
+)
 from ..config import get_default_working_dir
 from ..git_utils import is_git_repo, get_git_root, get_current_branch
 
@@ -48,131 +54,31 @@ def get_git_status(path: str = None):
             untracked: int - Number of untracked files
         }
     """
-    directory = path or get_default_working_dir()
-
-    if not directory or not os.path.isdir(directory):
-        return {"error": "Invalid directory", "is_clean": None, "changes_count": 0}
-
-    if not is_git_repo(directory):
-        return {"error": "Not a git repository", "is_clean": None, "changes_count": 0}
-
-    try:
-        # Get current branch
-        branch = get_current_branch(directory) or "unknown"
-
-        # Get porcelain status
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=directory,
-            capture_output=True,
-            text=True,
-            check=True
-        )
-
-        lines = [l for l in result.stdout.strip().split('\n') if l]
-
-        staged = 0
-        unstaged = 0
-        untracked = 0
-
-        for line in lines:
-            if len(line) >= 2:
-                index_status = line[0]
-                worktree_status = line[1]
-
-                if index_status == '?':
-                    untracked += 1
-                elif index_status != ' ':
-                    staged += 1
-
-                if worktree_status not in (' ', '?'):
-                    unstaged += 1
-
-        changes_count = len(lines)
-
-        return {
-            "is_clean": changes_count == 0,
-            "changes_count": changes_count,
-            "branch": branch,
-            "staged": staged,
-            "unstaged": unstaged,
-            "untracked": untracked
-        }
-    except subprocess.CalledProcessError as e:
-        return {"error": str(e), "is_clean": None, "changes_count": 0}
-    except Exception as e:
-        return {"error": str(e), "is_clean": None, "changes_count": 0}
+    return get_git_status_summary(path)
 
 
 @router.get("/local-claude/commits")
 def list_commits(limit: int = 10, branch: Optional[str] = None, all_branches: bool = False):
     """List recent commits."""
-    work_dir = get_default_working_dir()
-    git_root = get_git_root(work_dir)
-    if not git_root:
-        raise HTTPException(status_code=400, detail="Not in a git repository")
-
     try:
-        cmd = ["git", "log", f"-{limit}", "--pretty=format:%H|%s|%an|%ar|%ai"]
-        if all_branches:
-            cmd.append("--all")
-        elif branch:
-            cmd.append(branch)
-
-        result = subprocess.run(
-            cmd,
-            cwd=git_root,
-            capture_output=True,
-            text=True
-        )
-
-        if result.returncode != 0:
-            return {"commits": [], "error": result.stderr}
-
-        commits = []
-        for line in result.stdout.strip().split('\n'):
-            if not line:
-                continue
-            parts = line.split('|', 4)
-            if len(parts) >= 5:
-                commits.append({
-                    "hash": parts[0],
-                    "shortHash": parts[0][:7],
-                    "message": parts[1],
-                    "author": parts[2],
-                    "relativeDate": parts[3],
-                    "date": parts[4]
-                })
-
-        return {"commits": commits}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return list_recent_commits(limit=limit, branch=branch, all_branches=all_branches)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/local-claude/commit-diff/{sha}")
 def get_commit_diff(sha: str):
     """Get diff for a specific commit."""
-    work_dir = get_default_working_dir()
-    git_root = get_git_root(work_dir)
-    if not git_root:
-        raise HTTPException(status_code=400, detail="Not in a git repository")
-
     try:
-        result = subprocess.run(
-            ["git", "show", sha, "--stat", "--patch"],
-            cwd=git_root,
-            capture_output=True,
-            text=True
-        )
-
-        if result.returncode != 0:
-            raise HTTPException(status_code=404, detail=f"Commit not found: {sha}")
-
-        return {"sha": sha, "diff": result.stdout}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return runtime_get_commit_diff(sha)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @router.get("/local-claude/branch-graph")

@@ -6,7 +6,6 @@ including creation, execution, session resumption, and cleanup.
 """
 
 import asyncio
-import json
 import os
 import signal
 import subprocess
@@ -17,7 +16,19 @@ from typing import Dict, List, Optional
 
 from fastapi import HTTPException
 
-from .cli_providers import get_provider, get_available_providers, get_default_cli, CliProvider
+from ..computer_runtime.cli_runtime import (
+    build_resume_cli_command,
+    build_run_cli_command,
+    resolve_cli_provider,
+    spawn_cli_subprocess,
+)
+from ..computer_runtime.execution import (
+    broadcast_to_agent_listeners,
+    build_agent_prompt,
+    extract_result_from_output_buffer,
+    process_provider_output_text,
+)
+from .cli_providers import CliProvider
 from .config import get_default_working_dir
 from .git_utils import is_git_repo, get_current_branch, generate_branch_name
 from .worktree import create_worktree, remove_worktree
@@ -146,7 +157,7 @@ class LocalAgentManager:
             )
 
         # Resolve CLI provider
-        provider = get_provider(cli_tool)
+        provider = resolve_cli_provider(cli_tool)
         cli_path = provider.is_available()
         if not cli_path:
             raise HTTPException(
@@ -282,62 +293,27 @@ class LocalAgentManager:
         work_dir: Optional[str] = None
     ) -> str:
         """Build the final prompt, prepending worktree/workspace info if applicable."""
-        if prompt:
-            final_prompt = prompt
-            if worktree_path:
-                worktree_info = f"""## IMPORTANT: Worktree Already Created
-You are working in an isolated git worktree at: `{worktree_path}`
-Branch: `{target_branch}`
-
-Do NOT create another worktree - you are already isolated. Skip any worktree creation steps.
-
----
-
-"""
-                final_prompt = worktree_info + final_prompt
-            return final_prompt
-        else:
-            task_json = {
-                "task_uuid": task_id,
-                "task_number": task_number,
-                "title": task_title or "Untitled task",
-                "description": task_description or "",
-                "branch": target_branch,
-                "worktree_path": str(worktree_path) if worktree_path else None
-            }
-            return f"""Please start working on this task:
-
-```json
-{json.dumps(task_json, indent=2)}
-```"""
+        return build_agent_prompt(
+            prompt=prompt,
+            task_id=task_id,
+            task_number=task_number,
+            task_title=task_title,
+            task_description=task_description,
+            target_branch=target_branch,
+            worktree_path=worktree_path,
+        )
 
     def _get_provider(self, agent: LocalAgent) -> CliProvider:
         """Get the CLI provider for an agent."""
-        return get_provider(agent.cli_tool)
+        return resolve_cli_provider(agent.cli_tool)
 
     def _start_cli_process(self, agent: LocalAgent, final_prompt: str, system_prompt: Optional[str] = None) -> None:
         """Spawn the CLI process and start reading output."""
         provider = self._get_provider(agent)
-        cli_cmd = provider.build_run_command(final_prompt, system_prompt=system_prompt)
-
-        env = os.environ.copy()
-        for key in cli_cmd.env_overrides:
-            env.pop(key, None)
-        # Always remove CLAUDECODE to allow nested launches
-        env.pop("CLAUDECODE", None)
-        # Inject auth env vars (e.g. API keys from config)
-        if cli_cmd.env_inject:
-            env.update(cli_cmd.env_inject)
-
-        process = subprocess.Popen(
-            cli_cmd.args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            cwd=agent.work_dir,
-            env=env,
-            bufsize=1,
-            universal_newlines=False
+        cli_cmd = build_run_cli_command(
+            provider, final_prompt, system_prompt=system_prompt
         )
+        process = spawn_cli_subprocess(cli_cmd, agent.work_dir)
 
         agent.pid = process.pid
         agent.process = process
@@ -404,49 +380,13 @@ Do NOT create another worktree - you are already isolated. Skip any worktree cre
                     continue
 
                 agent.last_activity = datetime.now()
-
-                try:
-                    parsed = json.loads(text)
-
-                    # Normalize event through CLI provider (handles format differences)
-                    normalized = provider.normalize_event(parsed)
-                    if normalized is None:
-                        continue
-
-                    # Extract session_id using provider-specific logic
-                    session_id = provider.extract_session_id(parsed)
-                    if session_id:
-                        agent.session_id = session_id
-                        print(f"[LocalAgent] Got session_id: {session_id}")
-
-                    # Store normalized event for consistent downstream processing
-                    normalized_text = json.dumps(normalized)
-                    agent.output_buffer.append({"data": normalized_text, "parsed": normalized})
-                    if len(agent.output_buffer) > 1000:
-                        agent.output_buffer.pop(0)
-
-                    for queue in agent.output_listeners:
-                        try:
-                            await queue.put({
-                                "type": "output",
-                                "data": normalized_text,
-                                "raw": text
-                            })
-                        except Exception:
-                            pass
-
-                except json.JSONDecodeError:
-                    # Filter out known noise using provider-specific rules
-                    if provider.is_noise(text):
-                        continue
-                    for queue in agent.output_listeners:
-                        try:
-                            await queue.put({
-                                "type": "output",
-                                "data": text
-                            })
-                        except Exception:
-                            pass
+                before_session_id = agent.session_id
+                event = process_provider_output_text(agent, provider, text)
+                if not event:
+                    continue
+                if agent.session_id and agent.session_id != before_session_id:
+                    print(f"[LocalAgent] Got session_id: {agent.session_id}")
+                await broadcast_to_agent_listeners(agent, event)
 
             except Exception as e:
                 print(f"[LocalAgent] Read error: {e}")
@@ -462,41 +402,38 @@ Do NOT create another worktree - you are already isolated. Skip any worktree cre
             agent.session_id = None  # Don't keep session — allows cleanup
             print(f"[LocalAgent] Cron agent {agent.id} {agent.status} (exit={agent.exit_code})")
 
-            for queue in agent.output_listeners:
-                try:
-                    await queue.put({
-                        "type": "exit",
-                        "exit_code": agent.exit_code
-                    })
-                except Exception:
-                    pass
+            await broadcast_to_agent_listeners(
+                agent,
+                {
+                    "type": "exit",
+                    "exit_code": agent.exit_code,
+                },
+            )
 
             await self._fire_callback(agent)
         elif agent.session_id:
             agent.status = "paused"
             print(f"[LocalAgent] Agent {agent.id} paused, session can be resumed")
 
-            for queue in agent.output_listeners:
-                try:
-                    await queue.put({
-                        "type": "paused",
-                        "exit_code": agent.exit_code,
-                        "session_id": agent.session_id,
-                        "can_resume": True
-                    })
-                except Exception:
-                    pass
+            await broadcast_to_agent_listeners(
+                agent,
+                {
+                    "type": "paused",
+                    "exit_code": agent.exit_code,
+                    "session_id": agent.session_id,
+                    "can_resume": True,
+                },
+            )
         else:
             agent.status = "completed" if agent.exit_code == 0 else "failed"
 
-            for queue in agent.output_listeners:
-                try:
-                    await queue.put({
-                        "type": "exit",
-                        "exit_code": agent.exit_code
-                    })
-                except Exception:
-                    pass
+            await broadcast_to_agent_listeners(
+                agent,
+                {
+                    "type": "exit",
+                    "exit_code": agent.exit_code,
+                },
+            )
 
     def _extract_result(self, agent: LocalAgent) -> str:
         """Extract the final result text from the agent's output buffer.
@@ -504,27 +441,7 @@ Do NOT create another worktree - you are already isolated. Skip any worktree cre
         Looks for the 'result' type message in the stream-json output.
         Falls back to collecting assistant message text content.
         """
-        # Look for explicit result message (Claude CLI stream-json format)
-        for item in reversed(agent.output_buffer):
-            parsed = item.get("parsed") if isinstance(item, dict) else None
-            if not parsed:
-                continue
-            if parsed.get("type") == "result":
-                return parsed.get("result", "")
-
-        # Fallback: collect all assistant text content
-        text_parts = []
-        for item in agent.output_buffer:
-            parsed = item.get("parsed") if isinstance(item, dict) else None
-            if not parsed:
-                continue
-            if parsed.get("type") == "assistant":
-                message = parsed.get("message", {})
-                for block in message.get("content", []):
-                    if block.get("type") == "text":
-                        text_parts.append(block.get("text", ""))
-
-        return "\n\n".join(text_parts) if text_parts else ""
+        return extract_result_from_output_buffer(agent.output_buffer)
 
     async def _fire_callback(self, agent: LocalAgent) -> None:
         """Send completion callback to the cloud (for cron-triggered agents)."""
@@ -570,29 +487,14 @@ Do NOT create another worktree - you are already isolated. Skip any worktree cre
             return
 
         provider = self._get_provider(agent)
-        cli_cmd = provider.build_resume_command(message, agent.session_id)
-
-        env = os.environ.copy()
-        for key in cli_cmd.env_overrides:
-            env.pop(key, None)
-        env.pop("CLAUDECODE", None)
-        if cli_cmd.env_inject:
-            env.update(cli_cmd.env_inject)
+        cli_cmd = build_resume_cli_command(provider, message, agent.session_id)
 
         if image_paths:
             print(f"[LocalAgent] Message includes {len(image_paths)} image paths for CLI to read")
 
         print(f"[LocalAgent] Resuming session {agent.session_id} with {provider.display_name}")
 
-        process = subprocess.Popen(
-            cli_cmd.args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            cwd=agent.work_dir,
-            env=env,
-            bufsize=1,
-            universal_newlines=False
-        )
+        process = spawn_cli_subprocess(cli_cmd, agent.work_dir)
 
         agent.process = process
         agent.pid = process.pid

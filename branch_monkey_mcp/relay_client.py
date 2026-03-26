@@ -44,6 +44,15 @@ import httpx
 import websockets
 
 from .connection_logger import connection_logger
+from .kompany_local_transport.relay_forwarding import (
+    build_local_url,
+    execute_local_request as forward_local_request,
+)
+from .kompany_local_transport.relay_registration import (
+    post_cloud_heartbeat,
+    post_local_disconnect,
+    post_local_heartbeat,
+)
 
 
 # Reconnection settings
@@ -874,23 +883,14 @@ class RelayClient:
 
     async def _cloud_heartbeat(self, status: str = "online"):
         """Register/heartbeat via cloud API (bypasses RLS)."""
-        headers = {}
-        if self.access_token:
-            headers["Authorization"] = f"Bearer {self.access_token}"
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{self.cloud_url}/api/relay/heartbeat",
-                headers=headers,
-                json={
-                    "machine_id": self.machine_id,
-                    "machine_name": self.machine_name,
-                    "status": status,
-                    "local_port": self.local_port,
-                },
-                timeout=15,
-            )
-            resp.raise_for_status()
-            return resp.json()
+        return await post_cloud_heartbeat(
+            cloud_url=self.cloud_url,
+            access_token=self.access_token,
+            machine_id=self.machine_id,
+            machine_name=self.machine_name,
+            local_port=self.local_port,
+            status=status,
+        )
 
     async def _register_machine(self):
         """Register this machine as a compute node via the cloud API."""
@@ -967,16 +967,12 @@ class RelayClient:
     async def _send_local_heartbeat(self):
         """Send heartbeat to local server to indicate relay is connected."""
         try:
-            async with httpx.AsyncClient() as client:
-                await client.post(
-                    f"http://127.0.0.1:{self.local_port}/api/relay/heartbeat",
-                    json={
-                        "machine_id": self.machine_id,
-                        "machine_name": self.machine_name,
-                        "cloud_url": self.cloud_url
-                    },
-                    timeout=5
-                )
+            await post_local_heartbeat(
+                local_port=self.local_port,
+                machine_id=self.machine_id,
+                machine_name=self.machine_name,
+                cloud_url=self.cloud_url,
+            )
         except Exception:
             pass  # Local server might not support this yet
 
@@ -1027,11 +1023,7 @@ class RelayClient:
             pass
         # Notify local server of disconnection
         try:
-            async with httpx.AsyncClient() as client:
-                await client.post(
-                    f"http://127.0.0.1:{self.local_port}/api/relay/disconnect",
-                    timeout=5
-                )
+            await post_local_disconnect(self.local_port)
         except Exception:
             pass
 
@@ -1062,7 +1054,9 @@ class RelayClient:
         use_do = True
         transport = "DO bridge"
 
-        url = f"http://127.0.0.1:{self.local_port}/api/local-claude/agents/{agent_id}/stream"
+        url = build_local_url(
+            self.local_port, f"/api/local-claude/agents/{agent_id}/stream"
+        )
         print(f"[Relay] Starting SSE stream for agent {agent_id}, stream_id={stream_id} via {transport}")
 
         try:
@@ -1128,47 +1122,8 @@ class RelayClient:
 
     async def _execute_local_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Execute request on local server and return response."""
-        request_id = request.get("id")
-        method = request.get("method", "GET")
-        path = request.get("path", "/")
-        body = request.get("body", {})
-        headers = request.get("headers", {})
-
-        url = f"http://127.0.0.1:{self.local_port}{path}"
-
         try:
-            # Longer timeout for POST/PUT/PATCH as they may involve AI operations
-            read_timeout = 55 if method == "GET" else 180
-            async with httpx.AsyncClient() as client:
-                if method == "GET":
-                    response = await client.get(url, headers=headers, timeout=read_timeout)
-                elif method == "POST":
-                    response = await client.post(url, json=body, headers=headers, timeout=read_timeout)
-                elif method == "PUT":
-                    response = await client.put(url, json=body, headers=headers, timeout=read_timeout)
-                elif method == "DELETE":
-                    response = await client.delete(url, headers=headers, timeout=read_timeout)
-                elif method == "PATCH":
-                    response = await client.patch(url, json=body, headers=headers, timeout=read_timeout)
-                else:
-                    return {
-                        "type": "response",
-                        "id": request_id,
-                        "status": 405,
-                        "body": {"error": f"Method {method} not supported"}
-                    }
-
-                try:
-                    response_body = response.json()
-                except Exception:
-                    response_body = {"text": response.text}
-
-                return {
-                    "type": "response",
-                    "id": request_id,
-                    "status": response.status_code,
-                    "body": response_body
-                }
+            return await forward_local_request(self.local_port, request)
 
         except Exception as e:
             import traceback

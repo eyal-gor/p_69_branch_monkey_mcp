@@ -13,6 +13,12 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from ...cerver_compute.provider import (
+    build_provider_agent_payload,
+    build_provider_session_response,
+    build_provider_state,
+    get_provider_info as build_provider_info,
+)
 from ..agent_manager import agent_manager
 from .agents import get_workflow_summary
 
@@ -44,41 +50,6 @@ class ProviderStateRequest(BaseModel):
 
 def _unsupported(detail: str) -> HTTPException:
     return HTTPException(status_code=501, detail=detail)
-
-
-def _infer_workflow(metadata: Dict[str, Any]) -> str:
-    explicit = metadata.get("workflow")
-    if isinstance(explicit, str) and explicit.strip():
-        return explicit.strip()
-
-    if metadata.get("public_preview") is True:
-        return "workspace"
-
-    return "execute"
-
-
-def _agent_payload_from_request(request: CreateProviderSessionRequest) -> Dict[str, Any]:
-    metadata = request.metadata or {}
-    task = metadata.get("task")
-    title = metadata.get("session_name") or metadata.get("title") or task or "Cerver local session"
-    workload = metadata.get("workload")
-
-    description_parts = []
-    if isinstance(task, str) and task.strip():
-        description_parts.append(task.strip())
-    if isinstance(workload, str) and workload.strip():
-        description_parts.append(f"workload: {workload.strip()}")
-
-    return {
-        "title": title,
-        "description": " | ".join(description_parts) if description_parts else None,
-        "working_dir": metadata.get("working_dir"),
-        "workflow": _infer_workflow(metadata),
-        "branch": metadata.get("branch"),
-        "defer_start": True,
-        "cli_tool": metadata.get("cli_tool"),
-        "prompt": metadata.get("bootstrap_prompt"),
-    }
 
 
 def _extract_normalized_text(normalized: Any) -> str:
@@ -117,31 +88,6 @@ def _extract_stream_text(event: Dict[str, Any]) -> str:
         return _extract_normalized_text(normalized)
     except Exception:
         return event.get("raw") or data
-
-
-def _provider_session_response(agent_id: str, agent: Dict[str, Any], metadata: Dict[str, Any]) -> Dict[str, Any]:
-    return {
-        "sandbox_id": agent_id,
-        "remote_sandbox_id": agent_id,
-        "provider": "p69",
-        "engine": metadata.get("engine", "shell"),
-        "status": "ready",
-        "created_at": agent.get("created_at"),
-        "metadata": {
-            **metadata,
-            "cwd": agent.get("work_dir"),
-            "branch": agent.get("branch"),
-            "worktree_path": agent.get("worktree_path"),
-            "cli_tool": agent.get("cli_tool"),
-        },
-        "capabilities": [
-            "shell",
-            "streaming",
-            "local-computer",
-            "resume",
-            "worktree",
-        ],
-    }
 
 
 async def _send_provider_input(agent_id: str, message: str) -> Dict[str, Any]:
@@ -268,23 +214,12 @@ async def _provider_stream_events(
 
 @router.get("/provider")
 def get_provider_info():
-    return {
-        "provider": "p69",
-        "label": "Local Computer",
-        "mode": "local",
-        "capabilities": {
-            "runtimes": ["shell"],
-            "streaming": True,
-            "persistence": "high",
-            "desktop": True,
-            "public_preview": False,
-        },
-    }
+    return build_provider_info()
 
 
 @router.post("/provider/sandboxes")
 async def create_provider_session(request: CreateProviderSessionRequest):
-    payload = _agent_payload_from_request(request)
+    payload = build_provider_agent_payload(request.metadata or {})
     created = await agent_manager.create(
         task_title=payload["title"],
         task_description=payload["description"],
@@ -301,7 +236,7 @@ async def create_provider_session(request: CreateProviderSessionRequest):
     if not agent:
         raise HTTPException(status_code=500, detail="Failed to create provider session")
 
-    return _provider_session_response(
+    return build_provider_session_response(
         agent_id,
         agent,
         {
@@ -346,15 +281,12 @@ def get_provider_state(sandbox_id: str):
     if not agent:
         raise HTTPException(status_code=404, detail="Agent not found")
 
-    return {
-        "provider": "p69",
-        "sandbox_id": sandbox_id,
-        "agent": agent,
-        "agent_counts": {
-            "total": len(agent_manager.list()),
-        },
-        "workflow_summary": get_workflow_summary(),
-    }
+    return build_provider_state(
+        sandbox_id=sandbox_id,
+        agent=agent,
+        agent_total=len(agent_manager.list()),
+        workflow_summary=get_workflow_summary(),
+    )
 
 
 @router.put("/provider/sandboxes/{sandbox_id}/state")

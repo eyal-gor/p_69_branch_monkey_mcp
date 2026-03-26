@@ -4,7 +4,12 @@ Dev server management endpoints for the local server.
 
 from fastapi import APIRouter
 
-from ..dev_server_manager import DevServerRequest, manager
+from ...computer_runtime.dev_servers import (
+    DevServerRequest,
+    list_dev_servers as runtime_list_dev_servers,
+    start_dev_server as runtime_start_dev_server,
+    stop_dev_server as runtime_stop_dev_server,
+)
 
 router = APIRouter()
 
@@ -12,26 +17,16 @@ router = APIRouter()
 @router.post("/dev-server")
 async def start_dev_server(request: DevServerRequest):
     """Start a dev server for a worktree."""
-    run_id = request.run_id or str(request.task_number)
-    return await manager.start(
-        task_number=request.task_number,
-        run_id=run_id,
-        task_id=request.task_id,
-        dev_script=request.dev_script,
-        working_dir=request.working_dir,
-        tunnel=request.tunnel or False,
-        worktree_path=request.worktree_path,
-        project_path=request.project_path,
-    )
+    return await runtime_start_dev_server(request)
 
 
 @router.get("/dev-server")
 def list_dev_servers():
     """List running dev servers."""
-    return manager.list()
+    return runtime_list_dev_servers()
 
 
 @router.delete("/dev-server")
 def stop_dev_server_endpoint(run_id: str):
     """Stop a dev server by run_id."""
-    return manager.stop(run_id)
+    return runtime_stop_dev_server(run_id)

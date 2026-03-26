@@ -1,0 +1,113 @@
+"""
+Cerver-facing compute helpers for the p69 local computer runtime.
+
+This module is the beginning of the thin adapter layer that presents the
+local runtime as a Cerver-compatible compute provider.
+"""
+
+from typing import Any, Dict
+
+from ..computer_runtime.capabilities import get_runtime_capabilities
+from ..computer_runtime.machine_state import get_machine_state
+
+
+def infer_provider_workflow(metadata: Dict[str, Any]) -> str:
+    """Infer the local execution workflow from provider metadata."""
+    explicit = metadata.get("workflow")
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+
+    if metadata.get("public_preview") is True:
+        return "workspace"
+
+    return "execute"
+
+
+def build_provider_agent_payload(
+    metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Map provider metadata into the local agent/session creation payload."""
+    task = metadata.get("task")
+    title = metadata.get("session_name") or metadata.get("title") or task or "Cerver local session"
+    workload = metadata.get("workload")
+
+    description_parts = []
+    if isinstance(task, str) and task.strip():
+        description_parts.append(task.strip())
+    if isinstance(workload, str) and workload.strip():
+        description_parts.append(f"workload: {workload.strip()}")
+
+    return {
+        "title": title,
+        "description": " | ".join(description_parts) if description_parts else None,
+        "working_dir": metadata.get("working_dir"),
+        "workflow": infer_provider_workflow(metadata),
+        "branch": metadata.get("branch"),
+        "defer_start": True,
+        "cli_tool": metadata.get("cli_tool"),
+        "prompt": metadata.get("bootstrap_prompt"),
+    }
+
+
+def get_provider_info() -> Dict[str, Any]:
+    """Return provider metadata for the local computer."""
+    machine_state = get_machine_state()
+    return {
+        "provider": "p69",
+        "label": "Local Computer",
+        "mode": machine_state["mode"],
+        "status": machine_state["status"],
+        "machine_id": machine_state.get("machine_id"),
+        "machine_name": machine_state.get("machine_name"),
+        "last_heartbeat": machine_state.get("last_heartbeat"),
+        "working_directory": machine_state.get("working_directory"),
+        "capabilities": get_runtime_capabilities(),
+    }
+
+
+def build_provider_session_response(
+    agent_id: str,
+    agent: Dict[str, Any],
+    metadata: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Return the normalized provider create-session response."""
+    return {
+        "sandbox_id": agent_id,
+        "remote_sandbox_id": agent_id,
+        "provider": "p69",
+        "engine": metadata.get("engine", "shell"),
+        "status": "ready",
+        "created_at": agent.get("created_at"),
+        "metadata": {
+            **metadata,
+            "cwd": agent.get("work_dir"),
+            "branch": agent.get("branch"),
+            "worktree_path": agent.get("worktree_path"),
+            "cli_tool": agent.get("cli_tool"),
+        },
+        "capabilities": [
+            "shell",
+            "streaming",
+            "local-computer",
+            "resume",
+            "worktree",
+        ],
+    }
+
+
+def build_provider_state(
+    sandbox_id: str,
+    agent: Dict[str, Any],
+    agent_total: int,
+    workflow_summary: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Return normalized provider state."""
+    return {
+        "provider": "p69",
+        "sandbox_id": sandbox_id,
+        "agent": agent,
+        "agent_counts": {
+            "total": agent_total,
+        },
+        "workflow_summary": workflow_summary,
+    }
