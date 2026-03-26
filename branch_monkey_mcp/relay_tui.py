@@ -385,13 +385,18 @@ class RelayTUI:
             self._draw_animated_logo(stdscr, y, col)
             y += LOGO_HEIGHT
             subtitle = f"relay {ver}"
+            powered_by = "powered by Cerver"
             self._put(stdscr, y, col + LOGO_WIDTH - len(subtitle), subtitle, self._dim())
+            y += 1
+            self._put(stdscr, y, col + LOGO_WIDTH - len(powered_by), powered_by, self._dim())
             y += 1
             self._hline(stdscr, y, col, bar_w)
             y += 2
         else:
             self._put(stdscr, y, col, "kompany relay", self._bold() | self._green())
             self._put(stdscr, y, col + 15, ver, self._dim())
+            y += 1
+            self._put(stdscr, y, col, "powered by Cerver", self._dim())
             y += 1
             self._hline(stdscr, y, col, bar_w)
             y += 2
