@@ -44,6 +44,7 @@ import httpx
 import websockets
 
 from .cerver_compute import CerverComputeClient
+from .cerver_connect_transport import CerverConnectTransport
 from .connection_logger import connection_logger
 from .kompany_local_transport.relay_forwarding import (
     build_local_url,
@@ -202,6 +203,8 @@ class RelayClient:
         self.tui = tui
         self._request_count = 0
         self._cerver_client: Optional[CerverComputeClient] = None
+        self._cerver_connect_transport: Optional[CerverConnectTransport] = None
+        self._cerver_connect_task: Optional[asyncio.Task] = None
 
     def _tui_update(self, **kwargs):
         """Update TUI state if active."""
@@ -901,6 +904,7 @@ class RelayClient:
                 except Exception:
                     pass
 
+            await self._stop_cerver_connect_transport()
             await self._unregister_machine()
             await self._unregister_cerver_compute()
 
@@ -949,6 +953,74 @@ class RelayClient:
         )
         return self._cerver_client
 
+    def _ensure_cerver_connect_transport(self) -> Optional[CerverConnectTransport]:
+        client = self._ensure_cerver_client()
+        if not client or not client.api_token or not client.compute_id:
+            return None
+
+        if (
+            self._cerver_connect_transport
+            and self._cerver_connect_transport.cerver_url == client.cerver_url
+            and self._cerver_connect_transport.api_token == client.api_token
+            and self._cerver_connect_transport.compute_id == client.compute_id
+            and self._cerver_connect_transport.local_port == self.local_port
+        ):
+            return self._cerver_connect_transport
+
+        self._cerver_connect_transport = CerverConnectTransport(
+            cerver_url=client.cerver_url,
+            api_token=client.api_token,
+            compute_id=client.compute_id,
+            local_port=self.local_port,
+            on_status=self._handle_cerver_connect_status,
+            on_connected=self._handle_cerver_connect_connected,
+        )
+        return self._cerver_connect_transport
+
+    def _handle_cerver_connect_status(self, status: str):
+        if status == "connected":
+            self._tui_update(cerver_status="connected")
+            return
+
+        if status == "connecting":
+            self._tui_update(cerver_status="connecting")
+
+    def _handle_cerver_connect_connected(self, payload: Dict[str, Any]):
+        client = self._ensure_cerver_client()
+        print("[Cerver] Connect channel live")
+        self._tui_update(
+            cerver_status="connected",
+            cerver_compute_id=payload.get("compute_id") or (client.compute_id if client else None),
+            cerver_last_heartbeat=datetime.now(timezone.utc),
+        )
+
+    async def _start_cerver_connect_transport(self):
+        transport = self._ensure_cerver_connect_transport()
+        if not transport:
+            return
+
+        if self._cerver_connect_task and not self._cerver_connect_task.done():
+            return
+
+        self._tui_update(cerver_status="connecting")
+        self._cerver_connect_task = asyncio.create_task(transport.run())
+
+    async def _stop_cerver_connect_transport(self):
+        if self._cerver_connect_task and not self._cerver_connect_task.done():
+            self._cerver_connect_task.cancel()
+            try:
+                await asyncio.gather(self._cerver_connect_task, return_exceptions=True)
+            except Exception:
+                pass
+        self._cerver_connect_task = None
+
+        if self._cerver_connect_transport:
+            try:
+                await self._cerver_connect_transport.close()
+            except Exception:
+                pass
+        self._cerver_connect_transport = None
+
     async def _register_cerver_compute(self):
         client = self._ensure_cerver_client()
         if not client:
@@ -961,10 +1033,11 @@ class RelayClient:
             if compute_id:
                 print(f"[Cerver] Registered local compute {compute_id}")
                 self._tui_update(
-                    cerver_status="connected",
+                    cerver_status="connecting",
                     cerver_compute_id=compute_id,
                     cerver_last_heartbeat=datetime.now(timezone.utc),
                 )
+                await self._start_cerver_connect_transport()
         except Exception as e:
             print(f"[Cerver] Warning: Could not register compute: {e}")
             self._tui_update(
@@ -987,6 +1060,8 @@ class RelayClient:
                         cerver_compute_id=compute_id,
                         cerver_last_heartbeat=datetime.now(timezone.utc),
                     )
+                    if not self._cerver_connect_task or self._cerver_connect_task.done():
+                        await self._start_cerver_connect_transport()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1025,6 +1100,7 @@ class RelayClient:
                     await asyncio.gather(self._cerver_heartbeat_task, return_exceptions=True)
                 except Exception:
                     pass
+            await self._stop_cerver_connect_transport()
             await self._unregister_cerver_compute()
 
     async def _heartbeat_loop(self):
@@ -1158,6 +1234,7 @@ class RelayClient:
         print("[Relay] Shutting down gracefully...")
         self._running = False
         self.should_reconnect = False
+        await self._stop_cerver_connect_transport()
         await self._unregister_machine()
         await self._unregister_cerver_compute()
         print("[Relay] Disconnected. Goodbye!")

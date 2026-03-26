@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 import webbrowser
+import uuid
 
 import httpx
 
@@ -119,6 +120,12 @@ class CerverComputeClient:
         state[self._identity_key()] = self.compute_id
         _save_cerver_state(state)
 
+    def ensure_compute_id(self) -> str:
+        if not self.compute_id:
+            self.compute_id = f"comp_{uuid.uuid4().hex[:16]}"
+            self._persist_identity()
+        return self.compute_id
+
     def _headers(self) -> Dict[str, str]:
         headers = {"Content-Type": "application/json"}
         if self.api_token:
@@ -138,7 +145,8 @@ class CerverComputeClient:
 
     def _build_connection(self) -> Dict[str, Any]:
         connection: Dict[str, Any] = {
-            "base_url": f"http://127.0.0.1:{self.local_port}",
+            "transport": "cerver_connect",
+            "connect_id": self.ensure_compute_id(),
         }
 
         local_api_token = os.environ.get("P69_API_TOKEN")
@@ -158,8 +166,7 @@ class CerverComputeClient:
         }
         if self.owner_id:
             payload["owner_id"] = self.owner_id
-        if self.compute_id:
-            payload["compute_id"] = self.compute_id
+        payload["compute_id"] = self.ensure_compute_id()
         return payload
 
     async def ensure_authenticated(self) -> None:

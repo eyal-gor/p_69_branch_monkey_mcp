@@ -18,22 +18,26 @@ async def execute_local_request(local_port: int, request: Dict[str, Any]) -> Dic
     path = request.get("path", "/")
     body = request.get("body", {})
     headers = request.get("headers", {})
+    timeout_ms = request.get("timeout_ms")
 
     url = build_local_url(local_port, path)
 
     try:
-        read_timeout = 55 if method == "GET" else 180
+        if isinstance(timeout_ms, (int, float)) and timeout_ms > 0:
+            request_timeout = max(5.0, float(timeout_ms) / 1000.0)
+        else:
+            request_timeout = 55 if method == "GET" else 180
         async with httpx.AsyncClient() as client:
             if method == "GET":
-                response = await client.get(url, headers=headers, timeout=read_timeout)
+                response = await client.get(url, headers=headers, timeout=request_timeout)
             elif method == "POST":
-                response = await client.post(url, json=body, headers=headers, timeout=read_timeout)
+                response = await client.post(url, json=body, headers=headers, timeout=request_timeout)
             elif method == "PUT":
-                response = await client.put(url, json=body, headers=headers, timeout=read_timeout)
+                response = await client.put(url, json=body, headers=headers, timeout=request_timeout)
             elif method == "DELETE":
-                response = await client.delete(url, headers=headers, timeout=read_timeout)
+                response = await client.delete(url, headers=headers, timeout=request_timeout)
             elif method == "PATCH":
-                response = await client.patch(url, json=body, headers=headers, timeout=read_timeout)
+                response = await client.patch(url, json=body, headers=headers, timeout=request_timeout)
             else:
                 return {
                     "type": "response",
