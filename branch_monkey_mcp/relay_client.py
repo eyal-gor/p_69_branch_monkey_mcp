@@ -955,14 +955,22 @@ class RelayClient:
             return
 
         try:
+            self._tui_update(cerver_status="connecting")
             payload = await client.register()
             compute_id = payload.get("compute_id")
             if compute_id:
                 print(f"[Cerver] Registered local compute {compute_id}")
-                self._tui_update(cerver_compute_id=compute_id)
+                self._tui_update(
+                    cerver_status="connected",
+                    cerver_compute_id=compute_id,
+                    cerver_last_heartbeat=datetime.now(timezone.utc),
+                )
         except Exception as e:
             print(f"[Cerver] Warning: Could not register compute: {e}")
-            self._tui_update(cerver_compute_id=f"error: {str(e)[:60]}")
+            self._tui_update(
+                cerver_status="error",
+                cerver_compute_id=f"error: {str(e)[:60]}",
+            )
 
     async def _cerver_heartbeat_loop(self):
         while self._running:
@@ -974,11 +982,16 @@ class RelayClient:
                 payload = await client.heartbeat("online")
                 compute_id = payload.get("compute_id") or client.compute_id
                 if compute_id:
-                    self._tui_update(cerver_compute_id=compute_id)
+                    self._tui_update(
+                        cerver_status="connected",
+                        cerver_compute_id=compute_id,
+                        cerver_last_heartbeat=datetime.now(timezone.utc),
+                    )
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 print(f"[Cerver] Heartbeat failed: {e}")
+                self._tui_update(cerver_status="error")
 
     async def _unregister_cerver_compute(self):
         client = self._ensure_cerver_client()
@@ -993,6 +1006,7 @@ class RelayClient:
             return
 
         self._running = True
+        self._tui_update(cerver_only=True)
         await self._register_cerver_compute()
         self._cerver_heartbeat_task = asyncio.create_task(self._cerver_heartbeat_loop())
 
@@ -1669,6 +1683,7 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
         launchd=launchd_state,
         cli_providers=cli_providers,
         default_cli=default_cli,
+        cerver_only=args.cerver_only,
     )
     tui.install_capture()
 
