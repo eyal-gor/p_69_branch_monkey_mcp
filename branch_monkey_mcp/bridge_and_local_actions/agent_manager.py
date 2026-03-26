@@ -460,6 +460,7 @@ class LocalAgentManager:
             "agent_name": callback.get("agent_name", ""),
             "project_id": callback.get("project_id", ""),
             "user_id": callback.get("user_id", ""),
+            "session_id": callback.get("session_id") or None,
             "status": "completed" if status in ("completed", "paused") else "failed",
             "output": result_text
         }
