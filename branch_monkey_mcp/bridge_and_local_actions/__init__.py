@@ -10,8 +10,22 @@ Public API:
 - set_home_directory: Set the home directory (base directory passed to relay)
 """
 
-from .app import app, run_server
 from .config import set_default_working_dir, set_home_directory
+
+
+def run_server(*args, **kwargs):
+    """Start the FastAPI server lazily to avoid import cycles."""
+    from .app import run_server as _run_server
+
+    return _run_server(*args, **kwargs)
+
+
+def __getattr__(name):
+    if name == "app":
+        from .app import app
+
+        return app
+    raise AttributeError(name)
 
 __all__ = [
     "app",

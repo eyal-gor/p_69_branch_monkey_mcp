@@ -14,9 +14,8 @@ from ..bridge_and_local_actions.cli_providers import get_available_providers
 def get_available_cli_tools() -> List[str]:
     """Return installed CLI tool names."""
     tools: List[str] = []
-    for provider in get_available_providers():
-        name = provider.get("name")
-        if isinstance(name, str) and name:
+    for name, provider in get_available_providers().items():
+        if provider.get("installed") and isinstance(name, str) and name:
             tools.append(name)
     return tools
 

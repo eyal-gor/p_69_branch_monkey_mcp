@@ -5,18 +5,20 @@ This exposes a provider-shaped HTTP surface so p69 can appear inside Cerver
 as a first-class execution provider, just like a hosted sandbox backend.
 """
 
-import asyncio
-import json
-from typing import Any, AsyncGenerator, Dict, Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from ...cerver_compute.execution import (
+    collect_provider_run,
+    delete_provider_session as delete_provider_session_response,
+    get_provider_state_response,
+    provider_stream_events,
+)
 from ...cerver_compute.provider import (
-    build_provider_agent_payload,
-    build_provider_session_response,
-    build_provider_state,
+    create_provider_session as create_provider_session_response,
     get_provider_info as build_provider_info,
 )
 from ..agent_manager import agent_manager
@@ -52,166 +54,6 @@ def _unsupported(detail: str) -> HTTPException:
     return HTTPException(status_code=501, detail=detail)
 
 
-def _extract_normalized_text(normalized: Any) -> str:
-    if not isinstance(normalized, dict):
-        return ""
-
-    if normalized.get("type") == "assistant":
-        content = normalized.get("message", {}).get("content", [])
-        text_blocks = [
-            block.get("text", "")
-            for block in content
-            if isinstance(block, dict) and block.get("type") == "text"
-        ]
-        return "".join(text_blocks)
-
-    if normalized.get("type") == "tool_result":
-        return normalized.get("content", "") or ""
-
-    if normalized.get("type") == "result":
-        return normalized.get("result", "") or ""
-
-    text = normalized.get("text")
-    return text if isinstance(text, str) else ""
-
-
-def _extract_stream_text(event: Dict[str, Any]) -> str:
-    if event.get("type") != "output":
-        return ""
-
-    data = event.get("data")
-    if not isinstance(data, str):
-        return ""
-
-    try:
-        normalized = json.loads(data)
-        return _extract_normalized_text(normalized)
-    except Exception:
-        return event.get("raw") or data
-
-
-async def _send_provider_input(agent_id: str, message: str) -> Dict[str, Any]:
-    agent = agent_manager.get(agent_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    if agent["status"] == "prepared":
-        await agent_manager.spawn_cli_process(agent_id, message)
-        refreshed = agent_manager.get(agent_id) or {}
-        return {
-            "success": True,
-            "action": "started",
-            "cli_tool": refreshed.get("cli_tool"),
-            "images": 0,
-        }
-
-    if agent["status"] in ("paused", "completed", "failed") and agent.get("session_id"):
-        await agent_manager.resume_session(agent_id, message)
-        return {
-            "success": True,
-            "action": "resumed",
-            "images": 0,
-        }
-
-    if agent["status"] == "running":
-        raise HTTPException(
-            status_code=400,
-            detail="Agent is running. Wait for it to complete before sending another message.",
-        )
-
-    raise HTTPException(status_code=400, detail="No active session. Start a new task.")
-
-
-async def _collect_provider_run(agent_id: str, message: str, timeout_seconds: int) -> Dict[str, Any]:
-    queue = agent_manager.add_listener(agent_id)
-
-    try:
-        input_result = await _send_provider_input(agent_id, message)
-        stdout_parts = []
-        stderr_parts = []
-        exit_code = 0
-        final_status = "running"
-
-        while True:
-            try:
-                event = await asyncio.wait_for(queue.get(), timeout=timeout_seconds)
-            except asyncio.TimeoutError as exc:
-                raise HTTPException(
-                    status_code=408,
-                    detail=f"Timed out waiting for provider output after {timeout_seconds}s",
-                ) from exc
-
-            if event.get("type") == "error":
-                stderr_parts.append(event.get("error") or "Unknown local provider error")
-                final_status = "failed"
-                exit_code = 1
-                break
-
-            text = _extract_stream_text(event)
-            if text:
-                stdout_parts.append(text)
-
-            if event.get("type") == "paused":
-                final_status = "paused"
-                exit_code = event.get("exit_code") if isinstance(event.get("exit_code"), int) else 0
-                break
-
-            if event.get("type") == "exit":
-                final_status = "completed"
-                exit_code = event.get("exit_code") if isinstance(event.get("exit_code"), int) else 0
-                break
-
-        agent = agent_manager.get(agent_id) or {}
-        return {
-            "success": True,
-            "action": input_result.get("action"),
-            "command_id": agent.get("session_id") or agent_id,
-            "execution_runtime": "shell",
-            "exit_code": agent.get("exit_code") if isinstance(agent.get("exit_code"), int) else exit_code,
-            "stdout": "".join(stdout_parts).strip(),
-            "stderr": "".join(stderr_parts).strip(),
-            "cwd": agent.get("work_dir"),
-            "started_at": agent.get("created_at"),
-            "provider_session_status": agent.get("status") or final_status,
-            "can_resume": bool(agent.get("session_id")),
-            "session_id": agent.get("session_id"),
-        }
-    finally:
-        agent_manager.remove_listener(agent_id, queue)
-
-
-async def _provider_stream_events(
-    request: Request,
-    agent_id: str,
-    message: str,
-) -> AsyncGenerator[str, None]:
-    queue = agent_manager.add_listener(agent_id)
-
-    try:
-        agent = agent_manager.get(agent_id)
-        if not agent:
-            raise HTTPException(status_code=404, detail="Agent not found")
-
-        init_event = {"type": "connected", "agentId": agent_id, "status": agent["status"]}
-        yield f"data: {json.dumps(init_event)}\n\n"
-
-        await _send_provider_input(agent_id, message)
-
-        while True:
-            if await request.is_disconnected():
-                break
-
-            try:
-                event = await asyncio.wait_for(queue.get(), timeout=15.0)
-                yield f"data: {json.dumps(event)}\n\n"
-                if event.get("type") in ("exit", "paused"):
-                    break
-            except asyncio.TimeoutError:
-                yield ": heartbeat\n\n"
-    finally:
-        agent_manager.remove_listener(agent_id, queue)
-
-
 @router.get("/provider")
 def get_provider_info():
     return build_provider_info()
@@ -219,44 +61,24 @@ def get_provider_info():
 
 @router.post("/provider/sandboxes")
 async def create_provider_session(request: CreateProviderSessionRequest):
-    payload = build_provider_agent_payload(request.metadata or {})
-    created = await agent_manager.create(
-        task_title=payload["title"],
-        task_description=payload["description"],
-        working_dir=payload["working_dir"],
-        prompt=payload["prompt"],
-        skip_branch=payload["workflow"] in ("ask", "plan", "workspace"),
-        branch=payload["branch"],
-        defer_start=payload["defer_start"],
-        cli_tool=payload["cli_tool"],
-    )
-
-    agent_id = created.get("id")
-    agent = agent_manager.get(agent_id)
-    if not agent:
-        raise HTTPException(status_code=500, detail="Failed to create provider session")
-
-    return build_provider_session_response(
-        agent_id,
-        agent,
-        {
-            **request.metadata,
-            "engine": request.engine or "shell",
-            "timeout_ms": request.timeout_ms,
-        },
+    return await create_provider_session_response(
+        agent_manager=agent_manager,
+        metadata=request.metadata or {},
+        engine=request.engine or "shell",
+        timeout_ms=request.timeout_ms,
     )
 
 
 @router.post("/provider/sandboxes/{sandbox_id}/run")
 async def run_provider_session(sandbox_id: str, request: ProviderRunRequest):
     timeout_seconds = max(5, int(request.timeout or DEFAULT_TIMEOUT_SECONDS))
-    return await _collect_provider_run(sandbox_id, request.code, timeout_seconds)
+    return await collect_provider_run(agent_manager, sandbox_id, request.code, timeout_seconds)
 
 
 @router.post("/provider/sandboxes/{sandbox_id}/run/stream")
 async def stream_provider_session(sandbox_id: str, request: ProviderRunRequest, raw_request: Request):
     return StreamingResponse(
-        _provider_stream_events(raw_request, sandbox_id, request.code),
+        provider_stream_events(agent_manager, raw_request, sandbox_id, request.code),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -268,7 +90,8 @@ async def stream_provider_session(sandbox_id: str, request: ProviderRunRequest, 
 
 @router.post("/provider/sandboxes/{sandbox_id}/install")
 async def install_in_provider_session(sandbox_id: str, request: ProviderInstallRequest):
-    return await _collect_provider_run(
+    return await collect_provider_run(
+        agent_manager,
         sandbox_id,
         f"Run this exact shell command and return the result only: npm install {request.package} || pnpm add {request.package} || yarn add {request.package} || pip install {request.package}",
         DEFAULT_TIMEOUT_SECONDS,
@@ -277,14 +100,9 @@ async def install_in_provider_session(sandbox_id: str, request: ProviderInstallR
 
 @router.get("/provider/sandboxes/{sandbox_id}/state")
 def get_provider_state(sandbox_id: str):
-    agent = agent_manager.get(sandbox_id)
-    if not agent:
-        raise HTTPException(status_code=404, detail="Agent not found")
-
-    return build_provider_state(
+    return get_provider_state_response(
+        agent_manager=agent_manager,
         sandbox_id=sandbox_id,
-        agent=agent,
-        agent_total=len(agent_manager.list()),
         workflow_summary=get_workflow_summary(),
     )
 
@@ -306,11 +124,8 @@ def write_provider_file(sandbox_id: str):
 
 @router.delete("/provider/sandboxes/{sandbox_id}")
 def delete_provider_session(sandbox_id: str, cleanup_worktree: bool = False):
-    agent_manager.kill(sandbox_id, cleanup_worktree=cleanup_worktree)
-    return {
-        "success": True,
-        "sandbox_id": sandbox_id,
-        "remote_sandbox_id": sandbox_id,
-        "provider": "p69",
-        "status": "terminated",
-    }
+    return delete_provider_session_response(
+        agent_manager,
+        sandbox_id,
+        cleanup_worktree=cleanup_worktree,
+    )

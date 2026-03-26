@@ -1,0 +1,67 @@
+#!/bin/bash
+set -e
+
+# Cerver Local Compute Installer
+# Usage: curl -fsSL https://kompany.dev/install-cerver.sh | bash
+
+REPO="git+https://github.com/gneyal/p_69_branch_monkey_mcp.git"
+DEFAULT_CERVER_URL="${CERVER_GATEWAY_URL:-https://cerver-gateway.gneyal.workers.dev}"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+DIM='\033[38;2;107;114;128m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+echo ""
+echo -e "${BOLD}Cerver Local Compute${NC} — Installer"
+echo -e "${DIM}Registers this machine as private compute on Cerver${NC}"
+echo ""
+
+if ! command -v python3 &>/dev/null; then
+    echo -e "  Python     ${RED}not found${NC}"
+    echo ""
+    echo "  Python 3 is required. Install from https://python.org"
+    exit 1
+fi
+
+PY_VERSION=$(python3 -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
+echo -e "  Python     ${GREEN}${PY_VERSION}${NC}"
+
+if ! command -v uvx &>/dev/null; then
+    echo -e "  uv         ${DIM}installing...${NC}"
+    curl -LsSf https://astral.sh/uv/install.sh | sh 2>/dev/null
+    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
+
+    if ! command -v uvx &>/dev/null; then
+        echo -e "  uv         ${RED}failed${NC}"
+        echo ""
+        echo "  Install uv manually: https://docs.astral.sh/uv/"
+        exit 1
+    fi
+fi
+
+UV_VERSION=$(uv --version 2>/dev/null | head -1 || echo "unknown")
+echo -e "  uv         ${GREEN}${UV_VERSION}${NC}"
+
+echo ""
+echo -e "  Cerver     ${GREEN}${DEFAULT_CERVER_URL}${NC}"
+echo ""
+
+if [[ -z "${CERVER_OWNER_ID:-}" ]]; then
+    echo -e "${DIM}Enter the Cerver owner id for this machine:${NC}"
+    read -r CERVER_OWNER_ID </dev/tty
+fi
+
+if [[ -z "${CERVER_OWNER_ID:-}" ]]; then
+    echo -e "${RED}CERVER_OWNER_ID is required for the current Cerver registration flow.${NC}"
+    exit 1
+fi
+
+# </dev/tty ensures stdin comes from the terminal even when piped through curl
+exec uvx --from "$REPO" branch-monkey-relay \
+    --cerver-only \
+    --cerver-url "$DEFAULT_CERVER_URL" \
+    --cerver-owner-id "$CERVER_OWNER_ID" \
+    "$@" </dev/tty

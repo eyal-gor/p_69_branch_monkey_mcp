@@ -43,6 +43,7 @@ from typing import Optional, Dict, Any
 import httpx
 import websockets
 
+from .cerver_compute import CerverComputeClient
 from .connection_logger import connection_logger
 from .kompany_local_transport.relay_forwarding import (
     build_local_url,
@@ -154,12 +155,18 @@ class RelayClient:
         cloud_url: str = DEFAULT_CLOUD_URL,
         local_port: int = 18081,
         machine_name: Optional[str] = None,
-        tui=None
+        tui=None,
+        cerver_url: Optional[str] = None,
+        cerver_owner_id: Optional[str] = None,
+        cerver_api_token: Optional[str] = None,
     ):
         self.cloud_url = cloud_url.rstrip("/")
         self.local_port = local_port
         self.machine_name = machine_name or self._get_machine_name()
         self.machine_id = self._get_stable_machine_id()
+        self.cerver_url = cerver_url or os.environ.get("CERVER_GATEWAY_URL")
+        self.cerver_owner_id = cerver_owner_id or os.environ.get("CERVER_OWNER_ID")
+        self.cerver_api_token = cerver_api_token or os.environ.get("CERVER_API_TOKEN")
 
         # Auth data
         self.access_token: Optional[str] = None
@@ -187,12 +194,14 @@ class RelayClient:
         self._reconnect_task: Optional[asyncio.Task] = None
         self._health_check_task: Optional[asyncio.Task] = None
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._cerver_heartbeat_task: Optional[asyncio.Task] = None
         self._local_stats_task: Optional[asyncio.Task] = None
         self._background_tasks: set = set()
         self._do_reconnect_attempts = 0
         self._auth_refreshing = False
         self.tui = tui
         self._request_count = 0
+        self._cerver_client: Optional[CerverComputeClient] = None
 
     def _tui_update(self, **kwargs):
         """Update TUI state if active."""
@@ -823,6 +832,7 @@ class RelayClient:
         )
 
         self._running = True
+        await self._register_cerver_compute()
 
         # Initial connection
         if not await self._connect_do():
@@ -835,6 +845,7 @@ class RelayClient:
         self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
         self._health_check_task = asyncio.create_task(self._health_check_loop())
         self._local_stats_task = asyncio.create_task(self._local_stats_loop())
+        self._cerver_heartbeat_task = asyncio.create_task(self._cerver_heartbeat_loop())
 
         try:
             # Keep running until stopped
@@ -862,6 +873,8 @@ class RelayClient:
                 self._health_check_task.cancel()
             if self._local_stats_task:
                 self._local_stats_task.cancel()
+            if self._cerver_heartbeat_task:
+                self._cerver_heartbeat_task.cancel()
             if self._reconnect_task:
                 self._reconnect_task.cancel()
 
@@ -872,7 +885,16 @@ class RelayClient:
             self._background_tasks.clear()
 
             # Wait for tasks to finish
-            tasks = [t for t in [self._heartbeat_task, self._health_check_task, self._local_stats_task] if t]
+            tasks = [
+                t
+                for t in [
+                    self._heartbeat_task,
+                    self._health_check_task,
+                    self._local_stats_task,
+                    self._cerver_heartbeat_task,
+                ]
+                if t
+            ]
             if tasks:
                 try:
                     await asyncio.gather(*tasks, return_exceptions=True)
@@ -880,6 +902,7 @@ class RelayClient:
                     pass
 
             await self._unregister_machine()
+            await self._unregister_cerver_compute()
 
     async def _cloud_heartbeat(self, status: str = "online"):
         """Register/heartbeat via cloud API (bypasses RLS)."""
@@ -901,6 +924,87 @@ class RelayClient:
         except Exception as e:
             print(f"[Relay] Warning: Could not register compute node: {e}")
             self._tui_update(registered=str(e)[:80])
+
+    def _ensure_cerver_client(self) -> Optional[CerverComputeClient]:
+        owner_id = self.cerver_owner_id or self.user_id
+        if not owner_id:
+            return None
+
+        if self._cerver_client and self._cerver_client.owner_id == owner_id:
+            return self._cerver_client
+
+        self._cerver_client = CerverComputeClient(
+            cerver_url=self.cerver_url,
+            owner_id=owner_id,
+            local_port=self.local_port,
+            machine_name=self.machine_name,
+            api_token=self.cerver_api_token,
+        )
+        return self._cerver_client
+
+    async def _register_cerver_compute(self):
+        client = self._ensure_cerver_client()
+        if not client:
+            return
+
+        try:
+            payload = await client.register()
+            compute_id = payload.get("compute_id")
+            if compute_id:
+                print(f"[Cerver] Registered local compute {compute_id}")
+                self._tui_update(cerver_compute_id=compute_id)
+        except Exception as e:
+            print(f"[Cerver] Warning: Could not register compute: {e}")
+            self._tui_update(cerver_compute_id=f"error: {str(e)[:60]}")
+
+    async def _cerver_heartbeat_loop(self):
+        while self._running:
+            try:
+                await asyncio.sleep(60)
+                client = self._ensure_cerver_client()
+                if not client:
+                    continue
+                payload = await client.heartbeat("online")
+                compute_id = payload.get("compute_id") or client.compute_id
+                if compute_id:
+                    self._tui_update(cerver_compute_id=compute_id)
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"[Cerver] Heartbeat failed: {e}")
+
+    async def _unregister_cerver_compute(self):
+        client = self._ensure_cerver_client()
+        if not client:
+            return
+        await client.unregister()
+
+    async def connect_cerver_only(self):
+        """Register this local runtime with Cerver without connecting to Kompany Cloud."""
+        if not self.cerver_owner_id:
+            print("[Cerver] Missing owner id. Use --cerver-owner-id or CERVER_OWNER_ID.")
+            return
+
+        self._running = True
+        await self._register_cerver_compute()
+        self._cerver_heartbeat_task = asyncio.create_task(self._cerver_heartbeat_loop())
+
+        try:
+            while self._running:
+                await asyncio.sleep(1)
+        except KeyboardInterrupt:
+            print("\n[Cerver] Shutting down...")
+        except asyncio.CancelledError:
+            print("\n[Cerver] Task cancelled, shutting down...")
+        finally:
+            self._running = False
+            if self._cerver_heartbeat_task:
+                self._cerver_heartbeat_task.cancel()
+                try:
+                    await asyncio.gather(self._cerver_heartbeat_task, return_exceptions=True)
+                except Exception:
+                    pass
+            await self._unregister_cerver_compute()
 
     async def _heartbeat_loop(self):
         """Send periodic heartbeats to cloud API and local server.
@@ -1034,6 +1138,7 @@ class RelayClient:
         self._running = False
         self.should_reconnect = False
         await self._unregister_machine()
+        await self._unregister_cerver_compute()
         print("[Relay] Disconnected. Goodbye!")
         sys.exit(0)
 
@@ -1145,7 +1250,10 @@ class RelayClient:
 def run_relay_client(
     cloud_url: str = DEFAULT_CLOUD_URL,
     local_port: int = 18081,
-    machine_name: Optional[str] = None
+    machine_name: Optional[str] = None,
+    cerver_url: Optional[str] = None,
+    cerver_owner_id: Optional[str] = None,
+    cerver_api_token: Optional[str] = None,
 ):
     """
     Run the relay client.
@@ -1154,7 +1262,10 @@ def run_relay_client(
     client = RelayClient(
         cloud_url=cloud_url,
         local_port=local_port,
-        machine_name=machine_name
+        machine_name=machine_name,
+        cerver_url=cerver_url,
+        cerver_owner_id=cerver_owner_id,
+        cerver_api_token=cerver_api_token,
     )
 
     async def main():
@@ -1170,7 +1281,10 @@ def run_relay_client(
 async def start_relay_client_async(
     cloud_url: str = DEFAULT_CLOUD_URL,
     local_port: int = 18081,
-    machine_name: Optional[str] = None
+    machine_name: Optional[str] = None,
+    cerver_url: Optional[str] = None,
+    cerver_owner_id: Optional[str] = None,
+    cerver_api_token: Optional[str] = None,
 ) -> RelayClient:
     """
     Start the relay client as an async task.
@@ -1179,13 +1293,46 @@ async def start_relay_client_async(
     client = RelayClient(
         cloud_url=cloud_url,
         local_port=local_port,
-        machine_name=machine_name
+        machine_name=machine_name,
+        cerver_url=cerver_url,
+        cerver_owner_id=cerver_owner_id,
+        cerver_api_token=cerver_api_token,
     )
 
     # Start in background task
     asyncio.create_task(client.connect())
 
     return client
+
+
+def run_cerver_compute_client(
+    cerver_url: Optional[str] = None,
+    cerver_owner_id: Optional[str] = None,
+    local_port: int = 18081,
+    machine_name: Optional[str] = None,
+    cerver_api_token: Optional[str] = None,
+):
+    """
+    Run only the Cerver compute registration loop.
+    This keeps the local machine available on Cerver without connecting to Kompany Cloud.
+    """
+    client = RelayClient(
+        cloud_url=DEFAULT_CLOUD_URL,
+        local_port=local_port,
+        machine_name=machine_name,
+        cerver_url=cerver_url,
+        cerver_owner_id=cerver_owner_id,
+        cerver_api_token=cerver_api_token,
+    )
+
+    async def main():
+        await client.connect_cerver_only()
+
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n[Cerver] Shutting down...")
+        client.stop()
 
 
 def is_port_in_use(port: int) -> bool:
@@ -1536,10 +1683,16 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
             local_port=args.port,
             machine_name=args.name,
             tui=tui,
+            cerver_url=args.cerver_url,
+            cerver_owner_id=args.cerver_owner_id,
+            cerver_api_token=args.cerver_api_token,
         )
         relay_ref[0] = client
         try:
-            asyncio.run(client.connect())
+            if args.cerver_only:
+                asyncio.run(client.connect_cerver_only())
+            else:
+                asyncio.run(client.connect())
         except Exception as e:
             print(f"[Relay] Error: {e}")
 
@@ -1801,6 +1954,26 @@ def main():
         choices=["claude", "codex", "grok"],
         help="Set default AI CLI provider (claude, codex, or grok)"
     )
+    parser.add_argument(
+        "--cerver-url",
+        default=os.environ.get("CERVER_GATEWAY_URL"),
+        help="Cerver base URL for compute registration"
+    )
+    parser.add_argument(
+        "--cerver-owner-id",
+        default=os.environ.get("CERVER_OWNER_ID"),
+        help="Owner id to register this local compute under in Cerver"
+    )
+    parser.add_argument(
+        "--cerver-api-token",
+        default=os.environ.get("CERVER_API_TOKEN"),
+        help="Optional API token for talking to Cerver"
+    )
+    parser.add_argument(
+        "--cerver-only",
+        action="store_true",
+        help="Register this machine with Cerver without connecting to Kompany Cloud"
+    )
 
     args = parser.parse_args()
 
@@ -1835,12 +2008,13 @@ def main():
         print(f"[Relay] Error: Directory does not exist: {working_dir}")
         sys.exit(1)
 
-    # Set up MCP config unless --no-mcp is specified
-    if not args.no_mcp:
+    # Set up Kompany-specific MCP config unless disabled or running in Cerver-only mode
+    if not args.no_mcp and not args.cerver_only:
         setup_mcp_config(working_dir, args.cloud_url)
 
-    # Install Kompany skills into ~/.claude/skills/
-    install_skills()
+    # Install Kompany skills only for the Kompany-connected flow
+    if not args.cerver_only:
+        install_skills()
 
     # Determine home directory (parent of projects) vs current project
     # Home is typically the Code folder, project is a subfolder
@@ -1889,14 +2063,20 @@ def main():
             pass
 
     print(f"")
-    print(f"\033[1mKompany Relay\033[0m v{VERSION}")
+    if args.cerver_only:
+        print(f"\033[1mCerver Local Compute\033[0m v{VERSION}")
+        print(f"")
+        print(f"  \033[38;2;107;114;128mThis registers your machine with Cerver so it can appear\033[0m")
+        print(f"  \033[38;2;107;114;128mas private compute in apps like Kompany.\033[0m")
+    else:
+        print(f"\033[1mKompany Relay\033[0m v{VERSION}")
+        print(f"")
+        print(f"  \033[38;2;107;114;128mThis connects your machine to kompany.dev so you can\033[0m")
+        print(f"  \033[38;2;107;114;128mrun AI agents on your local codebase from the cloud.\033[0m")
     print(f"")
-    print(f"  \033[38;2;107;114;128mThis connects your machine to kompany.dev so you can\033[0m")
-    print(f"  \033[38;2;107;114;128mrun AI agents on your local codebase from the cloud.\033[0m")
-    print(f"")
-    if cached_user_email:
+    if cached_user_email and not args.cerver_only:
         print(f"  User:      \033[1m{cached_user_email}\033[0m")
-    if cached_org_name:
+    if cached_org_name and not args.cerver_only:
         print(f"  Org:       \033[1m{cached_org_name}\033[0m")
     print(f"  Home:      \033[1m{home_dir}\033[0m")
     if current_project:
@@ -1923,6 +2103,11 @@ def main():
         pass
 
     print(f"  Dashboard: \033[1mhttp://localhost:{args.port}/\033[0m")
+    if args.cerver_only:
+        target = args.cerver_url or os.environ.get("CERVER_GATEWAY_URL") or "https://cerver-gateway.gneyal.workers.dev"
+        owner_hint = args.cerver_owner_id or os.environ.get("CERVER_OWNER_ID") or "(missing owner id)"
+        print(f"  Cerver:    \033[1m{target}\033[0m")
+        print(f"  Owner:     \033[1m{owner_hint}\033[0m")
     print(f"")
 
     # Start local agent server unless --no-server is specified
@@ -1933,12 +2118,26 @@ def main():
     else:
         print(f"\033[38;2;107;114;128mSkipping local server (--no-server)\033[0m")
 
-    print(f"\033[38;2;107;114;128mConnecting to {args.cloud_url}...\033[0m")
-    run_relay_client(
-        cloud_url=args.cloud_url,
-        local_port=args.port,
-        machine_name=args.name
-    )
+    if args.cerver_only:
+        target = args.cerver_url or os.environ.get("CERVER_GATEWAY_URL") or "https://cerver-gateway.gneyal.workers.dev"
+        print(f"\033[38;2;107;114;128mRegistering local compute with {target}...\033[0m")
+        run_cerver_compute_client(
+            cerver_url=args.cerver_url,
+            cerver_owner_id=args.cerver_owner_id,
+            local_port=args.port,
+            machine_name=args.name,
+            cerver_api_token=args.cerver_api_token,
+        )
+    else:
+        print(f"\033[38;2;107;114;128mConnecting to {args.cloud_url}...\033[0m")
+        run_relay_client(
+            cloud_url=args.cloud_url,
+            local_port=args.port,
+            machine_name=args.name,
+            cerver_url=args.cerver_url,
+            cerver_owner_id=args.cerver_owner_id,
+            cerver_api_token=args.cerver_api_token,
+        )
 
 
 if __name__ == "__main__":

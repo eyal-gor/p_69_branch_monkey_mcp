@@ -7,6 +7,8 @@ local runtime as a Cerver-compatible compute provider.
 
 from typing import Any, Dict
 
+from fastapi import HTTPException
+
 from ..computer_runtime.capabilities import get_runtime_capabilities
 from ..computer_runtime.machine_state import get_machine_state
 
@@ -93,6 +95,41 @@ def build_provider_session_response(
             "worktree",
         ],
     }
+
+
+async def create_provider_session(
+    agent_manager: Any,
+    metadata: Dict[str, Any],
+    engine: str = "shell",
+    timeout_ms: Any = None,
+) -> Dict[str, Any]:
+    """Create a normalized provider session through the local runtime."""
+    payload = build_provider_agent_payload(metadata or {})
+    created = await agent_manager.create(
+        task_title=payload["title"],
+        task_description=payload["description"],
+        working_dir=payload["working_dir"],
+        prompt=payload["prompt"],
+        skip_branch=payload["workflow"] in ("ask", "plan", "workspace"),
+        branch=payload["branch"],
+        defer_start=payload["defer_start"],
+        cli_tool=payload["cli_tool"],
+    )
+
+    agent_id = created.get("id")
+    agent = agent_manager.get(agent_id)
+    if not agent:
+        raise HTTPException(status_code=500, detail="Failed to create provider session")
+
+    return build_provider_session_response(
+        agent_id,
+        agent,
+        {
+            **(metadata or {}),
+            "engine": engine or "shell",
+            "timeout_ms": timeout_ms,
+        },
+    )
 
 
 def build_provider_state(
