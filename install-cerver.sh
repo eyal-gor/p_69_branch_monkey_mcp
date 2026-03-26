@@ -49,19 +49,8 @@ echo ""
 echo -e "  Cerver     ${GREEN}${DEFAULT_CERVER_URL}${NC}"
 echo ""
 
-if [[ -z "${CERVER_OWNER_ID:-}" ]]; then
-    echo -e "${DIM}Enter the Cerver owner id for this machine:${NC}"
-    read -r CERVER_OWNER_ID </dev/tty
-fi
-
-if [[ -z "${CERVER_OWNER_ID:-}" ]]; then
-    echo -e "${RED}CERVER_OWNER_ID is required for the current Cerver registration flow.${NC}"
-    exit 1
-fi
-
 # </dev/tty ensures stdin comes from the terminal even when piped through curl
 exec uvx --from "$REPO" branch-monkey-relay \
     --cerver-only \
     --cerver-url "$DEFAULT_CERVER_URL" \
-    --cerver-owner-id "$CERVER_OWNER_ID" \
     "$@" </dev/tty

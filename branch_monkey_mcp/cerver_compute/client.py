@@ -8,10 +8,12 @@ on shutdown.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
+import webbrowser
 
 import httpx
 
@@ -62,28 +64,55 @@ class CerverComputeClient:
         self.machine_name = machine_name
         self.provider = provider
         self.api_token = api_token or os.environ.get("CERVER_API_TOKEN")
+        self.user_id: Optional[str] = None
         self.compute_id: Optional[str] = None
 
+        self._load_persisted_auth()
         self._load_persisted_identity()
 
     @property
     def enabled(self) -> bool:
-        return bool(self.owner_id and self.cerver_url)
+        return bool(self.cerver_url)
+
+    def _auth_key(self) -> str:
+        return f"auth::{self.cerver_url}"
 
     def _identity_key(self) -> str:
-        return f"{self.cerver_url}|{self.owner_id}|{self.provider}|{self.local_port}"
+        owner_key = self.owner_id or self.user_id or "anonymous"
+        return f"{self.cerver_url}|{owner_key}|{self.provider}|{self.local_port}"
 
-    def _load_persisted_identity(self) -> None:
-        if not self.owner_id:
+    def _load_persisted_auth(self) -> None:
+        state = _load_cerver_state()
+        auth_state = state.get(self._auth_key())
+        if not isinstance(auth_state, dict):
             return
 
+        access_token = auth_state.get("access_token")
+        user_id = auth_state.get("user_id")
+        if not self.api_token and isinstance(access_token, str) and access_token:
+            self.api_token = access_token
+        if isinstance(user_id, str) and user_id:
+            self.user_id = user_id
+
+    def _load_persisted_identity(self) -> None:
         state = _load_cerver_state()
         compute_id = state.get(self._identity_key())
         if isinstance(compute_id, str) and compute_id:
             self.compute_id = compute_id
 
+    def _persist_auth(self) -> None:
+        if not self.api_token:
+            return
+
+        state = _load_cerver_state()
+        state[self._auth_key()] = {
+            "access_token": self.api_token,
+            "user_id": self.user_id,
+        }
+        _save_cerver_state(state)
+
     def _persist_identity(self) -> None:
-        if not self.owner_id or not self.compute_id:
+        if not self.compute_id:
             return
 
         state = _load_cerver_state()
@@ -120,7 +149,6 @@ class CerverComputeClient:
 
     def _build_register_payload(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
-            "owner_id": self.owner_id,
             "label": self.machine_name,
             "kind": "local",
             "provider": self.provider,
@@ -128,13 +156,77 @@ class CerverComputeClient:
             "metadata": self._build_metadata(),
             "connection": self._build_connection(),
         }
+        if self.owner_id:
+            payload["owner_id"] = self.owner_id
         if self.compute_id:
             payload["compute_id"] = self.compute_id
         return payload
 
+    async def ensure_authenticated(self) -> None:
+        if self.api_token:
+            return
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                f"{self.cerver_url}/v2/auth/device",
+                headers={"Content-Type": "application/json"},
+                json={"machine_name": self.machine_name},
+            )
+            response.raise_for_status()
+            start_payload = response.json()
+
+        device_code = start_payload["device_code"]
+        user_code = start_payload["user_code"]
+        verification_uri = start_payload["verification_uri"]
+        expires_in = int(start_payload.get("expires_in", 900))
+        interval = int(start_payload.get("interval", 5))
+
+        print("\n[Cerver] Starting browser login...")
+        print(f"[Cerver] Visit: {verification_uri}")
+        print(f"[Cerver] Code:  {user_code}")
+
+        try:
+            webbrowser.open(verification_uri)
+        except Exception:
+            pass
+
+        deadline = asyncio.get_running_loop().time() + expires_in
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            while asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(interval)
+                poll_response = await client.get(
+                    f"{self.cerver_url}/v2/auth/device",
+                    params={"device_code": device_code},
+                )
+                poll_payload = poll_response.json()
+
+                if poll_payload.get("status") == "approved":
+                    access_token = poll_payload.get("access_token")
+                    user_id = poll_payload.get("user_id")
+                    if not isinstance(access_token, str) or not access_token:
+                        raise RuntimeError("Cerver auth approval did not return an access token")
+
+                    self.api_token = access_token
+                    self.user_id = user_id if isinstance(user_id, str) else None
+                    self._persist_auth()
+                    self._load_persisted_identity()
+                    print("[Cerver] Login successful")
+                    return
+
+                error = poll_payload.get("error")
+                if error == "access_denied":
+                    raise RuntimeError("Cerver login was denied")
+                if error == "expired_token":
+                    raise RuntimeError("Cerver login expired before approval")
+
+        raise RuntimeError("Timed out waiting for Cerver login approval")
+
     async def register(self) -> Dict[str, Any]:
         if not self.enabled:
-            raise RuntimeError("Cerver compute client is missing owner_id or cerver_url")
+            raise RuntimeError("Cerver compute client is missing cerver_url")
+
+        if not self.api_token and not self.owner_id:
+            await self.ensure_authenticated()
 
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(

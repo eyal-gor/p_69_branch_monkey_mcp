@@ -926,11 +926,18 @@ class RelayClient:
             self._tui_update(registered=str(e)[:80])
 
     def _ensure_cerver_client(self) -> Optional[CerverComputeClient]:
-        owner_id = self.cerver_owner_id or self.user_id
-        if not owner_id:
+        if not self.cerver_url:
             return None
 
-        if self._cerver_client and self._cerver_client.owner_id == owner_id:
+        owner_id = self.cerver_owner_id or self.user_id
+        api_token = self.cerver_api_token or self.access_token
+
+        if (
+            self._cerver_client
+            and self._cerver_client.owner_id == owner_id
+            and self._cerver_client.api_token == api_token
+            and self._cerver_client.cerver_url == self.cerver_url.rstrip("/")
+        ):
             return self._cerver_client
 
         self._cerver_client = CerverComputeClient(
@@ -938,7 +945,7 @@ class RelayClient:
             owner_id=owner_id,
             local_port=self.local_port,
             machine_name=self.machine_name,
-            api_token=self.cerver_api_token,
+            api_token=api_token,
         )
         return self._cerver_client
 
@@ -981,8 +988,8 @@ class RelayClient:
 
     async def connect_cerver_only(self):
         """Register this local runtime with Cerver without connecting to Kompany Cloud."""
-        if not self.cerver_owner_id:
-            print("[Cerver] Missing owner id. Use --cerver-owner-id or CERVER_OWNER_ID.")
+        if not self.cerver_url:
+            print("[Cerver] Missing Cerver URL. Use --cerver-url or CERVER_GATEWAY_URL.")
             return
 
         self._running = True
@@ -1962,7 +1969,7 @@ def main():
     parser.add_argument(
         "--cerver-owner-id",
         default=os.environ.get("CERVER_OWNER_ID"),
-        help="Owner id to register this local compute under in Cerver"
+        help="Legacy fallback owner id for Cerver registration"
     )
     parser.add_argument(
         "--cerver-api-token",
@@ -2105,9 +2112,12 @@ def main():
     print(f"  Dashboard: \033[1mhttp://localhost:{args.port}/\033[0m")
     if args.cerver_only:
         target = args.cerver_url or os.environ.get("CERVER_GATEWAY_URL") or "https://cerver-gateway.gneyal.workers.dev"
-        owner_hint = args.cerver_owner_id or os.environ.get("CERVER_OWNER_ID") or "(missing owner id)"
         print(f"  Cerver:    \033[1m{target}\033[0m")
-        print(f"  Owner:     \033[1m{owner_hint}\033[0m")
+        if args.cerver_owner_id or os.environ.get("CERVER_OWNER_ID"):
+            owner_hint = args.cerver_owner_id or os.environ.get("CERVER_OWNER_ID")
+            print(f"  Owner:     \033[1m{owner_hint}\033[0m \033[38;2;107;114;128m(legacy fallback)\033[0m")
+        else:
+            print(f"  Login:     \033[38;2;107;114;128mBrowser login on first registration\033[0m")
     print(f"")
 
     # Start local agent server unless --no-server is specified
