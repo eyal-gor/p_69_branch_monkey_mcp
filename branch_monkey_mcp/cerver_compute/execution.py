@@ -11,6 +11,7 @@ from typing import Any, AsyncGenerator, Dict
 
 from fastapi import HTTPException, Request
 
+from ..computer_runtime.execution import extract_result_from_output_buffer
 from .provider import build_provider_state
 
 
@@ -129,13 +130,19 @@ async def collect_provider_run(
                 break
 
         agent = agent_manager.get(agent_id) or {}
+        raw_agent = getattr(agent_manager, "_agents", {}).get(agent_id)
+        extracted_result = (
+            extract_result_from_output_buffer(getattr(raw_agent, "output_buffer", []))
+            if raw_agent
+            else ""
+        )
         return {
             "success": True,
             "action": input_result.get("action"),
             "command_id": agent.get("session_id") or agent_id,
             "execution_runtime": "shell",
             "exit_code": agent.get("exit_code") if isinstance(agent.get("exit_code"), int) else exit_code,
-            "stdout": "".join(stdout_parts).strip(),
+            "stdout": (extracted_result or "".join(stdout_parts)).strip(),
             "stderr": "".join(stderr_parts).strip(),
             "cwd": agent.get("work_dir"),
             "started_at": agent.get("created_at"),
