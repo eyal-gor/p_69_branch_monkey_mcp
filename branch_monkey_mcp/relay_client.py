@@ -229,7 +229,10 @@ class RelayClient:
         return delay + jitter
 
     def _get_machine_name(self) -> str:
-        """Generate a human-readable machine name."""
+        """Generate a human-readable machine name. Prefers saved nickname."""
+        saved = load_persistent_config().get("machine_name")
+        if saved:
+            return saved
         return socket.gethostname()
 
     def _get_stable_machine_id(self) -> str:
@@ -1604,6 +1607,8 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
         # Update Cerver registration label
         if relay_ref[0]._cerver_client:
             relay_ref[0]._cerver_client.machine_name = name
+        # Persist so it survives restarts
+        save_persistent_config({"machine_name": name})
         print(f"[Relay] Machine name set to: {name}")
 
     tui._on_name_set = on_name_set
