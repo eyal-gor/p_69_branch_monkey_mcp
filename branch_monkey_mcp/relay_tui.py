@@ -118,6 +118,10 @@ class RelayTUI:
         self._editing_home = False
         self._home_input = ""
         self._home_cursor = 0
+        self._editing_name = False
+        self._name_input = ""
+        self._name_cursor = 0
+        self._on_name_set = None  # Callback when machine name is confirmed
         self._onboarding_initialized = False
         self._onboarding_input = ""
         self._onboarding_cursor = 0
@@ -259,6 +263,46 @@ class RelayTUI:
             self._handle_launchd_prompt_key(key)
             return
 
+        # Machine name editing mode
+        if self._editing_name:
+            if key in (curses.KEY_ENTER, 10, 13):  # Enter
+                name = self._name_input.strip()
+                if name:
+                    self.state["machine_name"] = name
+                    if self._on_name_set:
+                        self._on_name_set(name)
+                self._editing_name = False
+                if stdscr:
+                    curses.curs_set(0)
+            elif key == 27:  # Escape — cancel
+                self._editing_name = False
+                if stdscr:
+                    curses.curs_set(0)
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                if self._name_cursor > 0:
+                    self._name_input = (
+                        self._name_input[: self._name_cursor - 1]
+                        + self._name_input[self._name_cursor :]
+                    )
+                    self._name_cursor -= 1
+            elif key == curses.KEY_LEFT:
+                self._name_cursor = max(0, self._name_cursor - 1)
+            elif key == curses.KEY_RIGHT:
+                self._name_cursor = min(len(self._name_input), self._name_cursor + 1)
+            elif key == curses.KEY_HOME or key == 1:  # Ctrl-A
+                self._name_cursor = 0
+            elif key == curses.KEY_END or key == 5:  # Ctrl-E
+                self._name_cursor = len(self._name_input)
+            elif 32 <= key <= 126:
+                ch = chr(key)
+                self._name_input = (
+                    self._name_input[: self._name_cursor]
+                    + ch
+                    + self._name_input[self._name_cursor :]
+                )
+                self._name_cursor += 1
+            return
+
         # Home directory editing mode
         if self._editing_home:
             if key in (curses.KEY_ENTER, 10, 13):  # Enter
@@ -304,6 +348,13 @@ class RelayTUI:
             else:
                 self._view = "logs"
                 self._scroll_offset = 0
+        elif key == ord("n") or key == ord("N"):
+            if self._view == "dashboard":
+                self._editing_name = True
+                self._name_input = self.state.get("machine_name", "")
+                self._name_cursor = len(self._name_input)
+                if stdscr:
+                    curses.curs_set(1)
         elif key == ord("h") or key == ord("H"):
             if self._view == "dashboard":
                 self._editing_home = True
@@ -436,9 +487,21 @@ class RelayTUI:
             self._put(stdscr, y, val_col, s["org_name"], self._bold())
             y += 1
 
-        # Machine info
+        # Machine info — editable field
         self._put(stdscr, y, lbl_col, "Machine", self._dim())
-        self._put(stdscr, y, val_col, s.get("machine_name", "\u2014"), self._bold())
+        if self._editing_name:
+            field_w = max(30, bar_w - val_col + col)
+            display = self._name_input[:field_w]
+            self._put(stdscr, y, val_col, display, self._bold() | self._cyan())
+            cursor_x = val_col + min(self._name_cursor, field_w)
+            try:
+                stdscr.move(y, cursor_x)
+            except curses.error:
+                pass
+        else:
+            machine_val = s.get("machine_name", "\u2014")
+            self._put(stdscr, y, val_col, machine_val, self._bold())
+            self._put(stdscr, y, val_col + len(machine_val) + 1, "[N]", self._dim())
         y += 1
 
         # Home — editable field
@@ -750,7 +813,10 @@ class RelayTUI:
         self._hline(stdscr, footer_y - 1, col, bar_w)
         x = lbl_col
         self._put(stdscr, footer_y, x, "[L]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 4, "Logs", self._dim())
+        self._put(stdscr, footer_y, x + 4, "oLogs", self._dim())
+        x += 11
+        self._put(stdscr, footer_y, x, "[N]", self._cyan() | self._bold())
+        self._put(stdscr, footer_y, x + 4, "Name", self._dim())
         x += 10
         self._put(stdscr, footer_y, x, "[H]", self._cyan() | self._bold())
         self._put(stdscr, footer_y, x + 4, "Home", self._dim())

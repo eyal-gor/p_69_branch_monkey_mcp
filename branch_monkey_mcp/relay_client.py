@@ -1598,6 +1598,16 @@ def _run_with_tui(args, home_dir, current_project, onboarding_needed=False):
 
     tui._on_home_set = on_home_set
 
+    # Callback when user renames the machine
+    def on_name_set(name):
+        relay_ref[0].machine_name = name
+        # Update Cerver registration label
+        if relay_ref[0]._cerver_client:
+            relay_ref[0]._cerver_client.machine_name = name
+        print(f"[Relay] Machine name set to: {name}")
+
+    tui._on_name_set = on_name_set
+
     # Callback when user toggles launchd service (install/uninstall)
     def on_launchd_toggle(do_install):
         import subprocess
