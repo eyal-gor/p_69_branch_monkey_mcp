@@ -47,6 +47,7 @@ UV_VERSION=$(uv --version 2>/dev/null | head -1 || echo "unknown")
 echo -e "  uv         ${GREEN}${UV_VERSION}${NC}"
 echo ""
 
-# Run the relay (uvx auto-installs the package)
+# Run the relay with Cerver registration enabled
 # </dev/tty ensures stdin comes from the terminal even when piped through curl
-exec uvx --from "$REPO" branch-monkey-relay "$@" </dev/tty
+CERVER_URL="${CERVER_GATEWAY_URL:-https://cerver-gateway.gneyal.workers.dev}"
+exec uvx --from "$REPO" branch-monkey-relay --cerver-url "$CERVER_URL" "$@" </dev/tty
