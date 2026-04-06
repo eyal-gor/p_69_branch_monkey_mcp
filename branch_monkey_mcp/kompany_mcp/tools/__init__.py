@@ -20,6 +20,7 @@ from . import agents
 from . import deployments
 from . import decisions
 from . import crons
+from . import compute
 
 __all__ = [
     "status",
@@ -37,4 +38,5 @@ __all__ = [
     "deployments",
     "decisions",
     "crons",
+    "compute",
 ]
