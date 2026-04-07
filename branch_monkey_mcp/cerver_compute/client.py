@@ -164,8 +164,6 @@ class CerverComputeClient:
             "metadata": self._build_metadata(),
             "connection": self._build_connection(),
         }
-        if self.owner_id:
-            payload["owner_id"] = self.owner_id
         payload["compute_id"] = self.ensure_compute_id()
         return payload
 
@@ -248,6 +246,11 @@ class CerverComputeClient:
         if isinstance(compute_id, str) and compute_id:
             self.compute_id = compute_id
             self._persist_identity()
+
+        # Use the server-resolved owner_id (may differ from local if auth mapped it)
+        server_owner = payload.get("owner_id")
+        if isinstance(server_owner, str) and server_owner:
+            self.owner_id = server_owner
 
         return payload
 
