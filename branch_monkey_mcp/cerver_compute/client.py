@@ -90,7 +90,7 @@ class CerverComputeClient:
 
         access_token = auth_state.get("access_token")
         user_id = auth_state.get("user_id")
-        if not self.api_token and isinstance(access_token, str) and access_token:
+        if isinstance(access_token, str) and access_token:
             self.api_token = access_token
         if isinstance(user_id, str) and user_id:
             self.user_id = user_id
