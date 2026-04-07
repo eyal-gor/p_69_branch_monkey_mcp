@@ -24,7 +24,7 @@ StatusCallback = Callable[[str], None]
 ConnectedCallback = Callable[[Dict[str, Any]], None]
 
 
-def build_cerver_connect_ws_url(cerver_url: str, compute_id: str) -> str:
+def build_cerver_connect_ws_url(cerver_url: str, compute_id: str, api_token: str = "") -> str:
     base = cerver_url.strip().rstrip("/")
     if base.startswith("https://"):
         ws_base = "wss://" + base[len("https://") :]
@@ -33,7 +33,7 @@ def build_cerver_connect_ws_url(cerver_url: str, compute_id: str) -> str:
     else:
         ws_base = base
 
-    return f"{ws_base}/v2/connect/ws?compute_id={quote(compute_id)}"
+    return f"{ws_base}/v2/connect/ws?compute_id={quote(compute_id)}&token={quote(api_token)}"
 
 
 class CerverConnectTransport:
@@ -95,7 +95,7 @@ class CerverConnectTransport:
             self._ws = None
 
     async def _connect_once(self) -> None:
-        ws_url = build_cerver_connect_ws_url(self.cerver_url, self.compute_id)
+        ws_url = build_cerver_connect_ws_url(self.cerver_url, self.compute_id, self.api_token)
         async with websockets.connect(
             ws_url,
             additional_headers={
