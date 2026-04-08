@@ -5,7 +5,7 @@ set -e
 # Usage: curl -fsSL https://kompany.dev/install-cerver.sh | bash
 
 REPO="git+https://github.com/gneyal/p_69_branch_monkey_mcp.git"
-DEFAULT_CERVER_URL="${CERVER_GATEWAY_URL:-https://cerver-gateway.gneyal.workers.dev}"
+DEFAULT_CERVER_URL="${CERVER_GATEWAY_URL:-https://gateway.cerver.ai}"
 
 # Colors
 RED='\033[0;31m'

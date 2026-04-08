@@ -49,5 +49,5 @@ echo ""
 
 # Run the relay with Cerver registration enabled
 # </dev/tty ensures stdin comes from the terminal even when piped through curl
-CERVER_URL="${CERVER_GATEWAY_URL:-https://cerver-gateway.gneyal.workers.dev}"
+CERVER_URL="${CERVER_GATEWAY_URL:-https://gateway.cerver.ai}"
 exec uvx --from "$REPO" branch-monkey-relay --cerver-url "$CERVER_URL" "$@" </dev/tty

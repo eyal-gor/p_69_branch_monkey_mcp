@@ -2218,7 +2218,7 @@ def main():
 
     print(f"  Dashboard: \033[1mhttp://localhost:{args.port}/\033[0m")
     if args.cerver_only:
-        target = args.cerver_url or os.environ.get("CERVER_GATEWAY_URL") or "https://cerver-gateway.gneyal.workers.dev"
+        target = args.cerver_url or os.environ.get("CERVER_GATEWAY_URL") or "https://gateway.cerver.ai"
         print(f"  Cerver:    \033[1m{target}\033[0m")
         if args.cerver_owner_id or os.environ.get("CERVER_OWNER_ID"):
             owner_hint = args.cerver_owner_id or os.environ.get("CERVER_OWNER_ID")
@@ -2236,7 +2236,7 @@ def main():
         print(f"\033[38;2;107;114;128mSkipping local server (--no-server)\033[0m")
 
     if args.cerver_only:
-        target = args.cerver_url or os.environ.get("CERVER_GATEWAY_URL") or "https://cerver-gateway.gneyal.workers.dev"
+        target = args.cerver_url or os.environ.get("CERVER_GATEWAY_URL") or "https://gateway.cerver.ai"
         print(f"\033[38;2;107;114;128mRegistering local compute with {target}...\033[0m")
         run_cerver_compute_client(
             cerver_url=args.cerver_url,

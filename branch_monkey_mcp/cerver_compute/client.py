@@ -22,7 +22,7 @@ from ..computer_runtime.capabilities import get_runtime_capabilities
 from ..computer_runtime.machine_state import get_machine_state
 
 
-DEFAULT_CERVER_URL = "https://cerver-gateway.gneyal.workers.dev"
+DEFAULT_CERVER_URL = "https://gateway.cerver.ai"
 CONFIG_DIR = Path.home() / ".kompany"
 CERVER_COMPUTE_STATE_FILE = CONFIG_DIR / "cerver_compute.json"
 
