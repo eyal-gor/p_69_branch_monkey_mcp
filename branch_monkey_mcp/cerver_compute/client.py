@@ -54,7 +54,7 @@ class CerverComputeClient:
         owner_id: Optional[str],
         local_port: int,
         machine_name: str,
-        provider: str = "p69",
+        provider: str = "cerver_local_provider",
         api_token: Optional[str] = None,
     ):
         self.cerver_url = _normalize_base_url(

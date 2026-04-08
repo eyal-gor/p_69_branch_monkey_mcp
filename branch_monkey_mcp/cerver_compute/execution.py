@@ -214,6 +214,6 @@ def delete_provider_session(
         "success": True,
         "sandbox_id": sandbox_id,
         "remote_sandbox_id": sandbox_id,
-        "provider": "p69",
+        "provider": "cerver_local_provider",
         "status": "terminated",
     }

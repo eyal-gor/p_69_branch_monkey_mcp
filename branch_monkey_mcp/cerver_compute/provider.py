@@ -55,7 +55,7 @@ def get_provider_info() -> Dict[str, Any]:
     """Return provider metadata for the local computer."""
     machine_state = get_machine_state()
     return {
-        "provider": "p69",
+        "provider": "cerver_local_provider",
         "label": "Local Computer",
         "mode": machine_state["mode"],
         "status": machine_state["status"],
@@ -76,7 +76,7 @@ def build_provider_session_response(
     return {
         "sandbox_id": agent_id,
         "remote_sandbox_id": agent_id,
-        "provider": "p69",
+        "provider": "cerver_local_provider",
         "engine": metadata.get("engine", "shell"),
         "status": "ready",
         "created_at": agent.get("created_at"),
@@ -140,7 +140,7 @@ def build_provider_state(
 ) -> Dict[str, Any]:
     """Return normalized provider state."""
     return {
-        "provider": "p69",
+        "provider": "cerver_local_provider",
         "sandbox_id": sandbox_id,
         "agent": agent,
         "agent_counts": {
