@@ -476,6 +476,12 @@ class RelayTUI:
             self._draw_cli_prompt(stdscr, y, col, bar_w)
             return
 
+        # Version — number of commits in the relay repo (bumps every commit)
+        if s.get("version"):
+            self._put(stdscr, y, lbl_col, "Version", self._dim())
+            self._put(stdscr, y, val_col, s["version"], self._bold())
+            y += 1
+
         # Account info
         if s.get("user_email"):
             self._put(stdscr, y, lbl_col, "User", self._dim())

@@ -31,6 +31,7 @@ import json
 import os
 import random
 import socket
+import subprocess
 import sys
 import time
 import webbrowser
@@ -73,8 +74,29 @@ class ConnectionState(Enum):
     CONNECTED = "connected"
     RECONNECTING = "reconnecting"
 
-# Version
-VERSION = "5"
+# Version — number of commits in the relay repo. Computed once on import
+# from `git rev-list --count HEAD` so every commit bumps it automatically.
+# Falls back to a baked value when running outside a git checkout (e.g.
+# inside a wheel install where the .git directory is gone).
+def _compute_version() -> str:
+    try:
+        pkg_dir = Path(__file__).resolve().parent.parent
+        result = subprocess.run(
+            ["git", "rev-list", "--count", "HEAD"],
+            cwd=str(pkg_dir),
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        count = (result.stdout or "").strip()
+        if result.returncode == 0 and count.isdigit():
+            return count
+    except Exception:
+        pass
+    return "287"  # last known commit count; bumped automatically when git is available
+
+
+VERSION = _compute_version()
 
 # Config file location
 CONFIG_DIR = Path.home() / ".kompany"
