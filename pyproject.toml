@@ -53,3 +53,9 @@ include = [
     "branch_monkey_mcp/static/**",
     "branch_monkey_mcp/skills/**",
 ]
+
+# Bake the git commit count into branch_monkey_mcp/_version.py at build time
+# so the runtime relay can show an accurate version even though the wheel
+# install ships without a .git directory. See hatch_build.py.
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"

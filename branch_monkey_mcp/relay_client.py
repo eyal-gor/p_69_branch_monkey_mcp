@@ -74,11 +74,18 @@ class ConnectionState(Enum):
     CONNECTED = "connected"
     RECONNECTING = "reconnecting"
 
-# Version — number of commits in the relay repo. Computed once on import
-# from `git rev-list --count HEAD` so every commit bumps it automatically.
-# Falls back to a baked value when running outside a git checkout (e.g.
-# inside a wheel install where the .git directory is gone).
+# Version — number of commits in the relay repo. Bakes at wheel build time
+# via hatch_build.VersionWriter (reads from branch_monkey_mcp/_version.py).
+# Falls back to a runtime `git rev-list` when developing from a working tree
+# without going through the build (pip install -e editable, source checkout).
 def _compute_version() -> str:
+    try:
+        from . import _version  # type: ignore
+        count = getattr(_version, "COMMIT_COUNT", "")
+        if count and str(count).isdigit():
+            return str(count)
+    except Exception:
+        pass
     try:
         pkg_dir = Path(__file__).resolve().parent.parent
         result = subprocess.run(
@@ -93,7 +100,7 @@ def _compute_version() -> str:
             return count
     except Exception:
         pass
-    return "287"  # last known commit count; bumped automatically when git is available
+    return "0"
 
 
 VERSION = _compute_version()
