@@ -912,15 +912,12 @@ class RelayClient:
             await self._unregister_cerver_compute()
 
     async def _cloud_heartbeat(self, status: str = "online"):
-        """Register/heartbeat via cloud API (bypasses RLS)."""
-        return await post_cloud_heartbeat(
-            cloud_url=self.cloud_url,
-            access_token=self.access_token,
-            machine_id=self.machine_id,
-            machine_name=self.machine_name,
-            local_port=self.local_port,
-            status=status,
-        )
+        """Deprecated: kompany no longer hosts /api/relay/heartbeat. The relay
+        now reports presence to cerver via the connect channel + the
+        registered cerver_local_provider compute. This is a no-op kept so
+        existing callers don't crash mid-migration.
+        """
+        return None
 
     async def _register_machine(self):
         """Register this machine as a compute node via the cloud API."""
