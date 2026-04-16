@@ -439,19 +439,19 @@ class RelayTUI:
             # Text logo only (no room for crew)
             self._draw_animated_logo(stdscr, y, col)
             y += LOGO_HEIGHT
-            subtitle = f"relay {ver}"
-            powered_by = "powered by Cerver"
+            subtitle = f"cerver relay {ver}"
+            tagline = "for kompany"
             self._put(stdscr, y, col + LOGO_WIDTH - len(subtitle), subtitle, self._dim())
             y += 1
-            self._put(stdscr, y, col + LOGO_WIDTH - len(powered_by), powered_by, self._dim())
+            self._put(stdscr, y, col + LOGO_WIDTH - len(tagline), tagline, self._dim())
             y += 1
             self._hline(stdscr, y, col, bar_w)
             y += 2
         else:
-            self._put(stdscr, y, col, "kompany relay", self._bold() | self._green())
-            self._put(stdscr, y, col + 15, ver, self._dim())
+            self._put(stdscr, y, col, "cerver relay", self._bold() | self._green())
+            self._put(stdscr, y, col + 14, ver, self._dim())
             y += 1
-            self._put(stdscr, y, col, "powered by Cerver", self._dim())
+            self._put(stdscr, y, col, "for kompany", self._dim())
             y += 1
             self._hline(stdscr, y, col, bar_w)
             y += 2
@@ -480,11 +480,6 @@ class RelayTUI:
         if s.get("user_email"):
             self._put(stdscr, y, lbl_col, "User", self._dim())
             self._put(stdscr, y, val_col, s["user_email"], self._bold())
-            y += 1
-
-        if s.get("org_name"):
-            self._put(stdscr, y, lbl_col, "Organization", self._dim())
-            self._put(stdscr, y, val_col, s["org_name"], self._bold())
             y += 1
 
         # Machine info — editable field
@@ -561,84 +556,66 @@ class RelayTUI:
         self._hline(stdscr, y, col, bar_w)
         y += 1
 
-        conn = s["connection"]
-        cerver_only = bool(s.get("cerver_only"))
+        # Cerver connection — single source of truth for relay presence.
+        cerver_status = s.get("cerver_status", "idle")
+        cerver_compute_id = s.get("cerver_compute_id")
+        cerver_compute_label = s.get("cerver_compute_label")
+        cerver_url = s.get("cerver_url") or "gateway.cerver.ai"
 
-        if cerver_only:
-            cerver_status = s.get("cerver_status", "idle")
-            cerver_compute_id = s.get("cerver_compute_id")
-
-            self._put(stdscr, y, lbl_col, "Cerver", self._dim())
-            if cerver_status == "connected":
-                self._put(stdscr, y, val_col, "\u25cf", self._green() | self._bold())
-                self._put(stdscr, y, val_col + 2, "Connected")
-            elif cerver_status == "connecting":
-                self._put(stdscr, y, val_col, "\u25cf", self._yellow() | self._bold())
-                self._put(stdscr, y, val_col + 2, "Connecting...")
-            elif isinstance(cerver_compute_id, str) and cerver_compute_id.startswith("error:"):
-                self._put(stdscr, y, val_col, "\u25cf", self._red() | self._bold())
-                self._put(stdscr, y, val_col + 2, "Registration failed")
-            else:
-                self._put(stdscr, y, val_col, "\u25cf", self._yellow() | self._bold())
-                self._put(stdscr, y, val_col + 2, "Waiting...")
-            y += 1
-            if self._verbose:
-                self._put(stdscr, y, val_col, "Connected to cerver.ai", self._dim())
-                y += 1
-
-            self._put(stdscr, y, lbl_col, "Compute", self._dim())
-            if isinstance(cerver_compute_id, str) and cerver_compute_id and not cerver_compute_id.startswith("error:"):
-                self._put(stdscr, y, val_col, "\u25cf", self._green() | self._bold())
-                self._put(stdscr, y, val_col + 2, cerver_compute_id[:bar_w - val_col])
-            elif isinstance(cerver_compute_id, str) and cerver_compute_id.startswith("error:"):
-                self._put(stdscr, y, val_col, "\u25cf", self._red() | self._bold())
-                self._put(stdscr, y, val_col + 2, cerver_compute_id[:bar_w - val_col])
-            else:
-                self._put(stdscr, y, val_col, "\u25cf", self._yellow() | self._bold())
-                self._put(stdscr, y, val_col + 2, "Registering...")
-            y += 1
-            if self._verbose:
-                self._put(stdscr, y, val_col, "Private compute ID in Cerver", self._dim())
-                y += 1
+        self._put(stdscr, y, lbl_col, "Cerver", self._dim())
+        if cerver_status == "connected":
+            self._put(stdscr, y, val_col, "\u25cf", self._green() | self._bold())
+            self._put(stdscr, y, val_col + 2, f"Connected  ·  {cerver_url}")
+        elif cerver_status == "connecting":
+            self._put(stdscr, y, val_col, "\u25cf", self._yellow() | self._bold())
+            self._put(stdscr, y, val_col + 2, f"Connecting...  ·  {cerver_url}")
+        elif isinstance(cerver_compute_id, str) and cerver_compute_id.startswith("error:"):
+            self._put(stdscr, y, val_col, "\u25cf", self._red() | self._bold())
+            self._put(stdscr, y, val_col + 2, "Registration failed")
         else:
-            # Cloud connection
-            if conn == "connected":
-                dot_attr = self._green() | self._bold()
-                label = "Connected"
-            elif conn in ("connecting", "reconnecting"):
-                dot_attr = self._yellow() | self._bold()
-                label = conn.capitalize() + "..."
-            else:
-                dot_attr = self._red() | self._bold()
-                label = "Disconnected"
+            self._put(stdscr, y, val_col, "\u25cf", self._yellow() | self._bold())
+            self._put(stdscr, y, val_col + 2, f"Waiting...  ·  {cerver_url}")
+        y += 1
 
-            self._put(stdscr, y, lbl_col, "Cloud", self._dim())
-            self._put(stdscr, y, val_col, "\u25cf", dot_attr)
-            self._put(stdscr, y, val_col + 2, label)
-            y += 1
-            if self._verbose:
-                self._put(stdscr, y, val_col, "Realtime channel to kompany.dev", self._dim())
-                y += 1
+        self._put(stdscr, y, lbl_col, "Compute", self._dim())
+        if isinstance(cerver_compute_id, str) and cerver_compute_id and not cerver_compute_id.startswith("error:"):
+            self._put(stdscr, y, val_col, "\u25cf", self._green() | self._bold())
+            label = cerver_compute_label or s.get("machine_name") or "compute"
+            display = f"{label}  ·  {cerver_compute_id}"
+            self._put(stdscr, y, val_col + 2, display[:bar_w - val_col - 2])
+        elif isinstance(cerver_compute_id, str) and cerver_compute_id.startswith("error:"):
+            self._put(stdscr, y, val_col, "\u25cf", self._red() | self._bold())
+            self._put(stdscr, y, val_col + 2, cerver_compute_id[:bar_w - val_col - 2])
+        else:
+            self._put(stdscr, y, val_col, "\u25cf", self._yellow() | self._bold())
+            self._put(stdscr, y, val_col + 2, "Registering...")
+        y += 1
 
-            # Registration status
-            reg = s.get("registered")
-            self._put(stdscr, y, lbl_col, "Registered", self._dim())
-            if reg is True:
-                self._put(stdscr, y, val_col, "\u25cf", self._green() | self._bold())
-                self._put(stdscr, y, val_col + 2, "OK")
-            elif isinstance(reg, str):
-                self._put(stdscr, y, val_col, "\u25cf", self._red() | self._bold())
-                self._put(stdscr, y, val_col + 2, reg[:bar_w - val_col])
-            elif conn == "connected":
-                self._put(stdscr, y, val_col, "\u25cf", self._yellow() | self._bold())
-                self._put(stdscr, y, val_col + 2, "Pending...")
-            else:
-                self._put(stdscr, y, val_col, "\u25cf", self._dim())
-                self._put(stdscr, y, val_col + 2, "\u2014")
-            y += 1
-            if self._verbose:
-                self._put(stdscr, y, val_col, "Machine visible to the web dashboard", self._dim())
-                y += 1
+        # Health (derived from CPU/memory/disk + active agents)
+        health = s.get("compute_health") or "\u2014"
+        health_attr = self._green() | self._bold()
+        if health == "Unhealthy":
+            health_attr = self._red() | self._bold()
+        elif health == "Stressed":
+            health_attr = self._yellow() | self._bold()
+        elif health == "Busy":
+            health_attr = self._cyan() | self._bold()
+        elif health == "\u2014":
+            health_attr = self._dim()
+        active_agents = (s.get("agent_counts") or {}).get("running", 0)
+        active_workflows = (((s.get("workflow_summary") or {}).get("counts")) or {}).get("running", 0)
+        active_total = active_agents + active_workflows
+        suffix = ""
+        if health == "Busy" and active_total > 0:
+            unit_a = "agent" if active_agents == 1 else "agents"
+            suffix = f"  ·  {active_agents} {unit_a} running"
+            if active_workflows > 0:
+                unit_w = "workflow" if active_workflows == 1 else "workflows"
+                suffix += f", {active_workflows} {unit_w}"
+        self._put(stdscr, y, lbl_col, "Health", self._dim())
+        self._put(stdscr, y, val_col, "\u25cf", health_attr)
+        self._put(stdscr, y, val_col + 2, f"{health}{suffix}")
+        y += 1
 
         # Local server
         self._put(stdscr, y, lbl_col, "Local Server", self._dim())
@@ -653,33 +630,9 @@ class RelayTUI:
             self._put(stdscr, y, val_col, "Handles agent execution requests", self._dim())
             y += 1
 
-        if not cerver_only:
-            # Stream bridge (DO)
-            sb = s.get("stream_bridge")
-            self._put(stdscr, y, lbl_col, "Stream Bridge", self._dim())
-            if sb is True:
-                self._put(stdscr, y, val_col, "\u25cf", self._green() | self._bold())
-                self._put(stdscr, y, val_col + 2, "Connected")
-            elif sb is False:
-                self._put(stdscr, y, val_col, "\u25cf", self._red() | self._bold())
-                self._put(stdscr, y, val_col + 2, "Disconnected")
-            elif isinstance(sb, str):
-                self._put(stdscr, y, val_col, "\u25cf", self._red() | self._bold())
-                self._put(stdscr, y, val_col + 2, sb[:bar_w - val_col])
-            elif conn == "connected":
-                self._put(stdscr, y, val_col, "\u25cf", self._yellow() | self._bold())
-                self._put(stdscr, y, val_col + 2, "Connecting...")
-            else:
-                self._put(stdscr, y, val_col, "\u25cf", self._dim())
-                self._put(stdscr, y, val_col + 2, "\u2014")
-            y += 1
-            if self._verbose:
-                self._put(stdscr, y, val_col, "Direct streaming via Cloudflare DO", self._dim())
-                y += 1
-
-        # Heartbeat
+        # Heartbeat (from cerver connect channel)
         self._put(stdscr, y, lbl_col, "Heartbeat", self._dim())
-        hb = s.get("cerver_last_heartbeat") if cerver_only else s.get("last_heartbeat")
+        hb = s.get("cerver_last_heartbeat")
         if hb:
             ago = int((datetime.now(timezone.utc) - hb).total_seconds())
             if ago < 60:
@@ -688,10 +641,7 @@ class RelayTUI:
             else:
                 self._put(stdscr, y, val_col, "\u25cf", self._yellow() | self._bold())
                 self._put(stdscr, y, val_col + 2, f"Stale  {ago}s ago")
-        elif cerver_only and s.get("cerver_status") == "connected":
-            self._put(stdscr, y, val_col, "\u25cf", self._yellow() | self._bold())
-            self._put(stdscr, y, val_col + 2, "Waiting...")
-        elif conn == "connected":
+        elif s.get("cerver_status") == "connected":
             self._put(stdscr, y, val_col, "\u25cf", self._yellow() | self._bold())
             self._put(stdscr, y, val_col + 2, "Waiting...")
         else:
