@@ -444,37 +444,54 @@ class LocalAgentManager:
         return extract_result_from_output_buffer(agent.output_buffer)
 
     async def _fire_callback(self, agent: LocalAgent) -> None:
-        """Send completion callback to the cloud (for cron-triggered agents)."""
+        """Push transcript + status to cerver for cron-triggered agents.
+
+        Callback config is expected to include cerver_url + cerver_api_token
+        + cerver_session_id (Kompany sets these when scheduling the run).
+        Falls back to nothing — no more Kompany /api/crons/callback hop.
+        """
         import httpx
 
         callback = agent.callback
-        if not callback or not callback.get("url"):
+        if not callback:
+            return
+
+        cerver_url = callback.get("cerver_url")
+        cerver_token = callback.get("cerver_api_token")
+        cerver_session_id = callback.get("cerver_session_id")
+        if not (cerver_url and cerver_token and cerver_session_id):
+            print(f"[LocalAgent] _fire_callback: missing cerver fields for {agent.task_title}; skipping")
             return
 
         result_text = self._extract_result(agent)
-        status = agent.status  # completed, failed, or paused
+        status = agent.status
+        cerver_status = "completed" if status in ("completed", "paused") else "failed"
 
-        payload = {
-            "cron_id": callback.get("cron_id", ""),
-            "cron_name": callback.get("cron_name", ""),
-            "agent_name": callback.get("agent_name", ""),
-            "project_id": callback.get("project_id", ""),
-            "user_id": callback.get("user_id", ""),
-            "session_id": callback.get("session_id") or None,
-            "status": "completed" if status in ("completed", "paused") else "failed",
-            "output": result_text
-        }
+        headers = {"Authorization": f"Bearer {cerver_token}"}
+        base = cerver_url.rstrip("/")
 
         try:
             async with httpx.AsyncClient(timeout=15) as client:
-                resp = await client.post(
-                    callback["url"],
-                    json=payload,
-                    headers={"x-cron-secret": callback.get("secret", "")}
+                if result_text and result_text.strip():
+                    transcript_resp = await client.post(
+                        f"{base}/v2/sessions/{cerver_session_id}/transcript",
+                        json={"entries": [{
+                            "role": "assistant",
+                            "kind": "text",
+                            "content": result_text,
+                        }]},
+                        headers={**headers, "Content-Type": "application/json"},
+                    )
+                    print(f"[LocalAgent] cerver transcript for {agent.task_title}: {transcript_resp.status_code}")
+
+                status_resp = await client.post(
+                    f"{base}/v2/sessions/{cerver_session_id}/status",
+                    json={"status": cerver_status, "end_reason": f"agent {status}"},
+                    headers={**headers, "Content-Type": "application/json"},
                 )
-            print(f"[LocalAgent] Callback sent for {agent.task_title}: status={resp.status_code}")
+                print(f"[LocalAgent] cerver status for {agent.task_title}: {status_resp.status_code}")
         except Exception as e:
-            print(f"[LocalAgent] Callback failed for {agent.task_title}: {e}")
+            print(f"[LocalAgent] cerver callback failed for {agent.task_title}: {e}")
 
     async def _run_with_resume(self, agent: LocalAgent, message: str, image_paths: List[str] = None) -> None:
         """Run a follow-up message using session resume.
