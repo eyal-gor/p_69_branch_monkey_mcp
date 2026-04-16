@@ -189,17 +189,29 @@ class LocalAgentManager:
                 else:
                     target_branch = get_current_branch(repo_dir)
             elif target_branch:
-                # Explicit branch mode (e.g. staging): create worktree for named branch
-                print(f"[LocalAgent] Creating worktree for explicit branch: {target_branch}")
-                result = create_worktree(repo_dir, target_branch, 0, f"{target_branch}-{agent_id}")
-                print(f"[LocalAgent] Worktree result: {result}")
-
-                if result["success"]:
-                    worktree_path = result["worktree_path"]
-                    work_dir = worktree_path
-                    branch_created = result["branch_created"]
+                # If the requested branch is already checked out at repo_dir,
+                # just use it directly — no point creating a duplicate worktree
+                # (and `git worktree add` would fail for an already-checked-out
+                # branch anyway).
+                current = get_current_branch(repo_dir)
+                if current == target_branch:
+                    print(f"[LocalAgent] Branch '{target_branch}' already checked out at {repo_dir}, using it directly")
+                    work_dir = repo_dir
                 else:
-                    target_branch = get_current_branch(repo_dir)
+                    print(f"[LocalAgent] Creating worktree for explicit branch: {target_branch}")
+                    result = create_worktree(repo_dir, target_branch, 0, f"{target_branch}-{agent_id}")
+                    print(f"[LocalAgent] Worktree result: {result}")
+
+                    if result["success"]:
+                        worktree_path = result["worktree_path"]
+                        work_dir = worktree_path
+                        branch_created = result["branch_created"]
+                    else:
+                        # Worktree creation failed — most likely because the
+                        # branch is checked out elsewhere. Honor the explicit
+                        # request anyway: keep target_branch and use repo_dir.
+                        print(f"[LocalAgent] Worktree create failed; honoring explicit branch on repo_dir")
+                        work_dir = repo_dir
             else:
                 # No task, no explicit branch: work in current directory
                 target_branch = get_current_branch(repo_dir)
