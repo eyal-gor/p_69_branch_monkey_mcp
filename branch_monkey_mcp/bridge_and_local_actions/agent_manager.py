@@ -6,6 +6,7 @@ including creation, execution, session resumption, and cleanup.
 """
 
 import asyncio
+import json
 import os
 import signal
 import subprocess
@@ -431,6 +432,22 @@ class LocalAgentManager:
         if agent.process:
             agent.exit_code = agent.process.wait()
 
+        # Belt-and-suspenders: when the read loop exits, flush the final
+        # result text from the buffer to cerver. The streaming push already
+        # handles each event during the run, but if the cerver POST for the
+        # last event(s) failed (network blip, cerver 5xx) the transcript
+        # would otherwise miss the answer. Idempotency is OK — cerver will
+        # de-dup or just append; either way the answer is preserved.
+        try:
+            final_text = self._extract_result(agent)
+            if final_text:
+                self._post_transcript_entries(
+                    agent,
+                    [{"role": "assistant", "kind": "text", "content": final_text}],
+                )
+        except Exception as exc:
+            print(f"[LocalAgent] final flush to cerver failed: {exc}")
+
         # Cron agents (with callback) should complete, not pause — they don't need
         # session resumption and would otherwise linger in the compute pool.
         if agent.callback:
@@ -480,13 +497,27 @@ class LocalAgentManager:
         return extract_result_from_output_buffer(agent.output_buffer)
 
     def _event_to_cerver_entries(self, event: Dict) -> list:
-        """Convert a Claude SDK / agent stream event into cerver
+        """Convert a normalized agent stream event into cerver
         SessionTranscriptEntry objects (one per content block).
+
+        process_provider_output_text wraps every line as
+        {"type": "output", "data": <inner-json-string>, "raw": <line>},
+        so we have to parse the inner event before mapping. Inner events
+        follow Claude Code's stream-json shape: assistant/user/result/system.
         """
-        etype = event.get("type")
+        # Unwrap the outer "output" envelope to get the actual stream event.
+        if event.get("type") == "output" and isinstance(event.get("data"), str):
+            try:
+                inner = json.loads(event["data"])
+            except (json.JSONDecodeError, TypeError):
+                return []
+        else:
+            inner = event
+
+        etype = (inner or {}).get("type")
         entries = []
         if etype == "assistant":
-            blocks = ((event.get("message") or {}).get("content")) or []
+            blocks = ((inner.get("message") or {}).get("content")) or []
             for b in blocks:
                 btype = b.get("type")
                 if btype == "text":
@@ -501,7 +532,7 @@ class LocalAgentManager:
                         "tool_input": b.get("input"),
                     })
         elif etype == "user":
-            blocks = ((event.get("message") or {}).get("content")) or []
+            blocks = ((inner.get("message") or {}).get("content")) or []
             for b in blocks:
                 if b.get("type") == "tool_result":
                     raw = b.get("content")
@@ -518,6 +549,13 @@ class LocalAgentManager:
                     })
                 elif b.get("type") == "text":
                     entries.append({"role": "user", "kind": "text", "content": b.get("text", "")})
+        elif etype == "result":
+            # Claude's final summary message at end of run. Capture it as a
+            # final assistant entry so the transcript ends with the answer
+            # the agent produced, not an in-flight tool_use.
+            text = inner.get("result") or ""
+            if text:
+                entries.append({"role": "assistant", "kind": "text", "content": text})
         return entries
 
     def _post_transcript_entries(self, agent: LocalAgent, entries: list) -> None:
