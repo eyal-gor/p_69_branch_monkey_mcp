@@ -388,6 +388,11 @@ class LocalAgentManager:
                     print(f"[LocalAgent] Got session_id: {agent.session_id}")
                 await broadcast_to_agent_listeners(agent, event)
 
+                # Push every event to cerver in the background (fire-and-forget).
+                # Lets headless cron / workflow runs persist their full
+                # transcript instead of just the final output.
+                self._push_event_to_cerver(agent, event)
+
             except Exception as e:
                 print(f"[LocalAgent] Read error: {e}")
                 break
@@ -443,6 +448,79 @@ class LocalAgentManager:
         """
         return extract_result_from_output_buffer(agent.output_buffer)
 
+    def _event_to_cerver_entries(self, event: Dict) -> list:
+        """Convert a Claude SDK / agent stream event into cerver
+        SessionTranscriptEntry objects (one per content block).
+        """
+        etype = event.get("type")
+        entries = []
+        if etype == "assistant":
+            blocks = ((event.get("message") or {}).get("content")) or []
+            for b in blocks:
+                btype = b.get("type")
+                if btype == "text":
+                    entries.append({"role": "assistant", "kind": "text", "content": b.get("text", "")})
+                elif btype == "tool_use":
+                    entries.append({
+                        "role": "assistant",
+                        "kind": "tool_use",
+                        "content": "",
+                        "tool_id": b.get("id"),
+                        "tool_name": b.get("name"),
+                        "tool_input": b.get("input"),
+                    })
+        elif etype == "user":
+            blocks = ((event.get("message") or {}).get("content")) or []
+            for b in blocks:
+                if b.get("type") == "tool_result":
+                    raw = b.get("content")
+                    if isinstance(raw, list):
+                        text = "".join(c.get("text", "") for c in raw if isinstance(c, dict) and c.get("type") == "text")
+                    else:
+                        text = str(raw or "")
+                    entries.append({
+                        "role": "tool",
+                        "kind": "tool_result",
+                        "content": text,
+                        "tool_id": b.get("tool_use_id"),
+                        "is_error": bool(b.get("is_error")),
+                    })
+                elif b.get("type") == "text":
+                    entries.append({"role": "user", "kind": "text", "content": b.get("text", "")})
+        return entries
+
+    def _push_event_to_cerver(self, agent: LocalAgent, event: Dict) -> None:
+        """Fire-and-forget push of one event to cerver's transcript endpoint."""
+        callback = agent.callback or {}
+        cerver_url = callback.get("cerver_url")
+        cerver_token = callback.get("cerver_api_token")
+        cerver_session_id = callback.get("cerver_session_id")
+        if not (cerver_url and cerver_token and cerver_session_id):
+            return
+        entries = self._event_to_cerver_entries(event)
+        if not entries:
+            return
+
+        async def _push():
+            import httpx
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    await client.post(
+                        f"{cerver_url.rstrip('/')}/v2/sessions/{cerver_session_id}/transcript",
+                        json={"entries": entries},
+                        headers={
+                            "Authorization": f"Bearer {cerver_token}",
+                            "Content-Type": "application/json",
+                        },
+                    )
+            except Exception as exc:
+                print(f"[LocalAgent] cerver transcript push failed: {exc}")
+
+        try:
+            asyncio.create_task(_push())
+        except Exception:
+            pass
+
     async def _fire_callback(self, agent: LocalAgent) -> None:
         """Push transcript + status to cerver for cron-triggered agents.
 
@@ -463,35 +541,24 @@ class LocalAgentManager:
             print(f"[LocalAgent] _fire_callback: missing cerver fields for {agent.task_title}; skipping")
             return
 
-        result_text = self._extract_result(agent)
+        # Per-event transcript pushes happen in _push_event_to_cerver during
+        # the run, so this callback only updates the lifecycle status.
         status = agent.status
         cerver_status = "completed" if status in ("completed", "paused") else "failed"
 
-        headers = {"Authorization": f"Bearer {cerver_token}"}
-        base = cerver_url.rstrip("/")
-
         try:
             async with httpx.AsyncClient(timeout=15) as client:
-                if result_text and result_text.strip():
-                    transcript_resp = await client.post(
-                        f"{base}/v2/sessions/{cerver_session_id}/transcript",
-                        json={"entries": [{
-                            "role": "assistant",
-                            "kind": "text",
-                            "content": result_text,
-                        }]},
-                        headers={**headers, "Content-Type": "application/json"},
-                    )
-                    print(f"[LocalAgent] cerver transcript for {agent.task_title}: {transcript_resp.status_code}")
-
                 status_resp = await client.post(
-                    f"{base}/v2/sessions/{cerver_session_id}/status",
+                    f"{cerver_url.rstrip('/')}/v2/sessions/{cerver_session_id}/status",
                     json={"status": cerver_status, "end_reason": f"agent {status}"},
-                    headers={**headers, "Content-Type": "application/json"},
+                    headers={
+                        "Authorization": f"Bearer {cerver_token}",
+                        "Content-Type": "application/json",
+                    },
                 )
                 print(f"[LocalAgent] cerver status for {agent.task_title}: {status_resp.status_code}")
         except Exception as e:
-            print(f"[LocalAgent] cerver callback failed for {agent.task_title}: {e}")
+            print(f"[LocalAgent] cerver status push failed for {agent.task_title}: {e}")
 
     async def _run_with_resume(self, agent: LocalAgent, message: str, image_paths: List[str] = None) -> None:
         """Run a follow-up message using session resume.
