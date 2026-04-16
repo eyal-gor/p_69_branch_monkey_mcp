@@ -112,6 +112,17 @@ class CerverComputeClient:
         }
         _save_cerver_state(state)
 
+    def _clear_persisted_auth(self) -> None:
+        """Wipe the saved cerver token so the next ensure_authenticated call
+        re-runs the device-code flow. Used when cerver rejects our token
+        with 401 (rotated, revoked, or never matched the account)."""
+        self.api_token = None
+        self.user_id = None
+        state = _load_cerver_state()
+        if self._auth_key() in state:
+            state.pop(self._auth_key(), None)
+            _save_cerver_state(state)
+
     def _persist_identity(self) -> None:
         if not self.compute_id:
             return
@@ -226,6 +237,27 @@ class CerverComputeClient:
 
         raise RuntimeError("Timed out waiting for Cerver login approval")
 
+    async def _post_with_auth_retry(self, path: str, json_body: Dict[str, Any]) -> Dict[str, Any]:
+        """POST with one automatic re-auth on 401. The saved cerver token can
+        go stale (rotated, revoked, account migrated). Rather than asking the
+        user to edit ~/.kompany/cerver_compute.json by hand, clear the token
+        and trigger the device-code flow once, then retry the call."""
+        for attempt in range(2):
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(
+                    f"{self.cerver_url}{path}",
+                    headers=self._headers(),
+                    json=json_body,
+                )
+            if response.status_code == 401 and attempt == 0 and self.api_token:
+                print("[Cerver] Saved token rejected (401) — re-running browser login")
+                self._clear_persisted_auth()
+                await self.ensure_authenticated()
+                continue
+            response.raise_for_status()
+            return response.json()
+        raise RuntimeError("Cerver auth retry exhausted")
+
     async def register(self) -> Dict[str, Any]:
         if not self.enabled:
             raise RuntimeError("Cerver compute client is missing cerver_url")
@@ -233,14 +265,9 @@ class CerverComputeClient:
         if not self.api_token and not self.owner_id:
             await self.ensure_authenticated()
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(
-                f"{self.cerver_url}/v2/computes/register",
-                headers=self._headers(),
-                json=self._build_register_payload(),
-            )
-            response.raise_for_status()
-            payload = response.json()
+        payload = await self._post_with_auth_retry(
+            "/v2/computes/register", self._build_register_payload()
+        )
 
         compute_id = payload.get("compute_id")
         if isinstance(compute_id, str) and compute_id:
@@ -261,18 +288,14 @@ class CerverComputeClient:
         if not self.compute_id:
             raise RuntimeError("Cerver compute registration did not return a compute_id")
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.post(
-                f"{self.cerver_url}/v2/computes/{self.compute_id}/heartbeat",
-                headers=self._headers(),
-                json={
-                    "status": status,
-                    "capabilities": get_runtime_capabilities(),
-                    "metadata": self._build_metadata(),
-                },
-            )
-            response.raise_for_status()
-            return response.json()
+        return await self._post_with_auth_retry(
+            f"/v2/computes/{self.compute_id}/heartbeat",
+            {
+                "status": status,
+                "capabilities": get_runtime_capabilities(),
+                "metadata": self._build_metadata(),
+            },
+        )
 
     async def unregister(self) -> None:
         if not self.compute_id:
