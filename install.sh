@@ -47,7 +47,10 @@ UV_VERSION=$(uv --version 2>/dev/null | head -1 || echo "unknown")
 echo -e "  uv         ${GREEN}${UV_VERSION}${NC}"
 echo ""
 
-# Run the relay with Cerver registration enabled
-# </dev/tty ensures stdin comes from the terminal even when piped through curl
+# Run the relay with Cerver registration enabled.
+# --refresh tells uvx to re-resolve the git URL on every launch — without it
+# uvx caches the install per repo URL and ignores new commits, so a restart
+# (or even a re-install) keeps running stale code. </dev/tty ensures stdin
+# comes from the terminal even when piped through curl.
 CERVER_URL="${CERVER_GATEWAY_URL:-https://gateway.cerver.ai}"
-exec uvx --from "$REPO" branch-monkey-relay --cerver-url "$CERVER_URL" "$@" </dev/tty
+exec uvx --refresh --from "$REPO" branch-monkey-relay --cerver-url "$CERVER_URL" "$@" </dev/tty
