@@ -194,6 +194,29 @@ class RelayClient:
         self.local_port = local_port
         self.machine_name = machine_name or self._get_machine_name()
         self.machine_id = self._get_stable_machine_id()
+
+        # Seed _relay_status with our machine_id immediately. The legacy
+        # stream-bridge connection used to be the only thing populating it
+        # (via _send_local_heartbeat after a successful WebSocket connect),
+        # so cerver-only relays with no stream-bridge ended up registering
+        # under metadata.relay_machine_id=None — and kompany's compute
+        # lookup couldn't match them. The id is stable across restarts, so
+        # there's no harm setting it before the WS comes up.
+        try:
+            from .bridge_and_local_actions.config import update_relay_status
+            update_relay_status(
+                connected=False,
+                machine_id=self.machine_id,
+                machine_name=self.machine_name,
+                cloud_url=self.cloud_url,
+            )
+            # update_relay_status only sets machine_id when connected=True;
+            # set it directly so the cerver_compute metadata picks it up.
+            from .bridge_and_local_actions import config as _cfg
+            _cfg._relay_status["machine_id"] = self.machine_id
+            _cfg._relay_status["machine_name"] = self.machine_name
+        except Exception:
+            pass
         self.cerver_url = cerver_url or os.environ.get("CERVER_GATEWAY_URL")
         self.cerver_owner_id = cerver_owner_id or os.environ.get("CERVER_OWNER_ID")
         self.cerver_api_token = cerver_api_token or os.environ.get("CERVER_API_TOKEN")
