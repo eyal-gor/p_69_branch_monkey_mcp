@@ -279,6 +279,13 @@ class LocalAgentManager:
 
         self._agents[agent_id] = agent
 
+        # Push the initial user prompt to cerver so the transcript starts
+        # with the user's question, not the agent's first response. Uses the
+        # raw `prompt` arg (not the worktree-augmented final_prompt) — that's
+        # what the user actually asked.
+        if prompt:
+            self._push_user_message(agent, prompt)
+
         try:
             self._start_cli_process(agent, final_prompt, system_prompt=system_prompt)
 
@@ -366,6 +373,10 @@ class LocalAgentManager:
         )
 
         print(f"[LocalAgent] Spawning CLI for prepared session {agent_id}")
+
+        # Mirror the user's first message into cerver before the CLI starts
+        # producing assistant output.
+        self._push_user_message(agent, message)
 
         try:
             self._start_cli_process(agent, final_prompt)
@@ -509,16 +520,18 @@ class LocalAgentManager:
                     entries.append({"role": "user", "kind": "text", "content": b.get("text", "")})
         return entries
 
-    def _push_event_to_cerver(self, agent: LocalAgent, event: Dict) -> None:
-        """Fire-and-forget push of one event to cerver's transcript endpoint."""
+    def _post_transcript_entries(self, agent: LocalAgent, entries: list) -> None:
+        """Fire-and-forget POST of transcript entries to cerver. No-op if the
+        agent isn't bound to a cerver session (chat sessions started from the
+        Kompany frontend write transcripts via the kompany API instead).
+        """
+        if not entries:
+            return
         callback = agent.callback or {}
         cerver_url = callback.get("cerver_url")
         cerver_token = callback.get("cerver_api_token")
         cerver_session_id = callback.get("cerver_session_id")
         if not (cerver_url and cerver_token and cerver_session_id):
-            return
-        entries = self._event_to_cerver_entries(event)
-        if not entries:
             return
 
         async def _push():
@@ -540,6 +553,22 @@ class LocalAgentManager:
             asyncio.create_task(_push())
         except Exception:
             pass
+
+    def _push_event_to_cerver(self, agent: LocalAgent, event: Dict) -> None:
+        """Push one CLI stream event to cerver as transcript entries."""
+        self._post_transcript_entries(agent, self._event_to_cerver_entries(event))
+
+    def _push_user_message(self, agent: LocalAgent, content: str) -> None:
+        """Push a user-side message (initial prompt or follow-up input) so the
+        cerver transcript captures the full conversation, not just assistant
+        output. Without this, cron / workflow sessions start at the agent's
+        first response with no context for what was asked.
+        """
+        if not content:
+            return
+        self._post_transcript_entries(
+            agent, [{"role": "user", "kind": "text", "content": content}]
+        )
 
     async def _fire_callback(self, agent: LocalAgent) -> None:
         """Push transcript + status to cerver for cron-triggered agents.
@@ -680,6 +709,10 @@ class LocalAgentManager:
 
         if image_paths:
             print(f"[LocalAgent] Resuming with {len(image_paths)} images: {image_paths}")
+
+        # Push the follow-up user message before the resumed agent starts
+        # streaming its response, so the cerver transcript reads in order.
+        self._push_user_message(agent, message)
 
         try:
             if agent_id in self._output_tasks:
