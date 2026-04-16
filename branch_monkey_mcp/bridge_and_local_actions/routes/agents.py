@@ -131,7 +131,13 @@ class CreateAgentRequest(BaseModel):
 
 
 class CronCallback(BaseModel):
-    """Callback info for notifying the cloud when a cron agent finishes."""
+    """Callback info for notifying cerver when a cron agent finishes.
+
+    cerver_* fields wire the agent to a cerver shadow session so each
+    streamed event gets pushed to /v2/sessions/{id}/transcript in real
+    time. Without them, _push_event_to_cerver returns early and the
+    transcript stays empty.
+    """
     url: str
     secret: str = ""
     cron_id: str = ""
@@ -140,6 +146,9 @@ class CronCallback(BaseModel):
     project_id: str = ""
     user_id: str = ""
     session_id: Optional[str] = None
+    cerver_url: Optional[str] = None
+    cerver_api_token: Optional[str] = None
+    cerver_session_id: Optional[str] = None
 
 
 class RunAgentRequest(BaseModel):
