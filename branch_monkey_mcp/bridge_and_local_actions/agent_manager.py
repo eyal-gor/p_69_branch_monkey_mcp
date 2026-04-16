@@ -31,7 +31,7 @@ from ..computer_runtime.execution import (
 from .cli_providers import CliProvider
 from .config import get_default_working_dir
 from .git_utils import is_git_repo, get_current_branch, generate_branch_name
-from .worktree import create_worktree, remove_worktree
+from .worktree import create_worktree, find_worktree_for_branch, remove_worktree
 
 
 @dataclass
@@ -207,11 +207,19 @@ class LocalAgentManager:
                         work_dir = worktree_path
                         branch_created = result["branch_created"]
                     else:
-                        # Worktree creation failed — most likely because the
-                        # branch is checked out elsewhere. Honor the explicit
-                        # request anyway: keep target_branch and use repo_dir.
-                        print(f"[LocalAgent] Worktree create failed; honoring explicit branch on repo_dir")
-                        work_dir = repo_dir
+                        # Worktree creation failed — usually because the branch
+                        # is already checked out in another worktree. Find that
+                        # worktree and use it, so we don't end up running on
+                        # whatever stale branch repo_dir happens to be on.
+                        existing = find_worktree_for_branch(repo_dir, target_branch)
+                        if existing:
+                            print(f"[LocalAgent] Reusing existing worktree for '{target_branch}': {existing}")
+                            worktree_path = existing
+                            work_dir = existing
+                        else:
+                            print(f"[LocalAgent] Worktree create failed and no existing worktree for '{target_branch}'; falling back to repo_dir on '{current}'")
+                            work_dir = repo_dir
+                            target_branch = current
             else:
                 # No task, no explicit branch: work in current directory
                 target_branch = get_current_branch(repo_dir)

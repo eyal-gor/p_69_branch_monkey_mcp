@@ -124,6 +124,37 @@ def remove_worktree(repo_dir: str, worktree_path: str) -> None:
         shutil.rmtree(worktree_path, ignore_errors=True)
 
 
+def find_worktree_for_branch(repo_dir: str, branch: str) -> Optional[str]:
+    """Return the path of an existing worktree that has `branch` checked out, if any.
+
+    Uses `git worktree list --porcelain` so we catch worktrees in any location,
+    not just the .worktrees/ directory. Returns the worktree path or None.
+    """
+    git_root = get_git_root(repo_dir) or repo_dir
+    try:
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=git_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+    current_path: Optional[str] = None
+    target = f"refs/heads/{branch}"
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            current_path = line[len("worktree "):].strip()
+        elif line.startswith("branch ") and current_path:
+            if line[len("branch "):].strip() == target:
+                return current_path
+        elif not line.strip():
+            current_path = None
+    return None
+
+
 def find_worktree_path(task_number: int, project_path: Optional[str] = None) -> Optional[str]:
     """Find the worktree path for a task number.
 
