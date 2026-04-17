@@ -116,6 +116,31 @@ def get_workflow_summary() -> dict:
         }
 
 
+class CronCallback(BaseModel):
+    """Callback info for notifying cerver when an agent finishes.
+
+    Originally cron-only; now used by all agent-creating endpoints
+    (/agents, /run-agent) so any agent can stream its transcript into a
+    cerver shadow session. cerver_* fields wire the agent to its shadow:
+    each event gets pushed to /v2/sessions/{id}/transcript via
+    _push_event_to_cerver. Without them, no cerver writes happen.
+
+    The non-cerver fields (url, cron_id, etc.) are vestigial for non-cron
+    callers and can be omitted.
+    """
+    url: str = ""
+    secret: str = ""
+    cron_id: str = ""
+    cron_name: str = ""
+    agent_name: str = ""
+    project_id: str = ""
+    user_id: str = ""
+    session_id: Optional[str] = None
+    cerver_url: Optional[str] = None
+    cerver_api_token: Optional[str] = None
+    cerver_session_id: Optional[str] = None
+
+
 class CreateAgentRequest(BaseModel):
     task_id: Optional[str] = None
     task_number: Optional[int] = None
@@ -128,27 +153,11 @@ class CreateAgentRequest(BaseModel):
     branch: Optional[str] = None
     defer_start: bool = False
     cli_tool: Optional[str] = None  # 'claude' or 'codex'; defaults to 'claude'
-
-
-class CronCallback(BaseModel):
-    """Callback info for notifying cerver when a cron agent finishes.
-
-    cerver_* fields wire the agent to a cerver shadow session so each
-    streamed event gets pushed to /v2/sessions/{id}/transcript in real
-    time. Without them, _push_event_to_cerver returns early and the
-    transcript stays empty.
-    """
-    url: str
-    secret: str = ""
-    cron_id: str = ""
-    cron_name: str = ""
-    agent_name: str = ""
-    project_id: str = ""
-    user_id: str = ""
-    session_id: Optional[str] = None
-    cerver_url: Optional[str] = None
-    cerver_api_token: Optional[str] = None
-    cerver_session_id: Optional[str] = None
+    # Optional cerver wiring — when present, every stream event from this
+    # agent is pushed to /v2/sessions/{cerver_session_id}/transcript via
+    # _push_event_to_cerver. Lets task / chat sessions persist transcripts
+    # without depending on a connected frontend, same as cron via /run-agent.
+    callback: Optional[CronCallback] = None
 
 
 class RunAgentRequest(BaseModel):
@@ -271,6 +280,8 @@ async def create_agent(request: CreateAgentRequest):
     # Derive skip_branch from workflow — non-code workflows skip git worktree
     skip_branch = request.skip_branch or request.workflow in ("ask", "plan", "workspace")
 
+    callback_dict = request.callback.model_dump() if request.callback else None
+
     return await agent_manager.create(
         task_id=request.task_id,
         task_number=request.task_number,
@@ -281,7 +292,8 @@ async def create_agent(request: CreateAgentRequest):
         skip_branch=skip_branch,
         branch=request.branch,
         defer_start=request.defer_start,
-        cli_tool=request.cli_tool
+        cli_tool=request.cli_tool,
+        callback=callback_dict,
     )
 
 
