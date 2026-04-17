@@ -30,6 +30,7 @@ import asyncio
 import json
 import os
 import random
+import shutil
 import socket
 import subprocess
 import sys
@@ -104,6 +105,43 @@ def _compute_version() -> str:
 
 
 VERSION = _compute_version()
+
+
+def _current_commit_sha() -> str:
+    """Best-effort: which commit this running process was built from."""
+    try:
+        from . import _version  # type: ignore
+        sha = getattr(_version, "COMMIT_SHA", "")
+        if sha:
+            return str(sha)
+    except Exception:
+        pass
+    try:
+        pkg_dir = Path(__file__).resolve().parent.parent
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(pkg_dir),
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if result.returncode == 0:
+            return (result.stdout or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+CURRENT_COMMIT_SHA = _current_commit_sha()
+# Public github repo to poll for auto-updates. Same URL the install.sh uses
+# for uvx; can be overridden via env for forks.
+RELAY_GITHUB_REPO = os.environ.get(
+    "RELAY_UPDATE_REPO", "gneyal/p_69_branch_monkey_mcp"
+)
+# How often to poll GitHub for a newer commit. Default 10 min — short enough
+# to roll out fixes within a coffee break, long enough to stay well under
+# GitHub's anonymous 60 req/hour rate limit.
+UPDATE_POLL_INTERVAL = int(os.environ.get("RELAY_UPDATE_INTERVAL_S", "600"))
 
 # Config file location
 CONFIG_DIR = Path.home() / ".kompany"
@@ -904,6 +942,7 @@ class RelayClient:
         self._health_check_task = asyncio.create_task(self._health_check_loop())
         self._local_stats_task = asyncio.create_task(self._local_stats_loop())
         self._cerver_heartbeat_task = asyncio.create_task(self._cerver_heartbeat_loop())
+        self._update_check_task = asyncio.create_task(self._update_check_loop())
 
         try:
             # Keep running until stopped
@@ -1119,6 +1158,75 @@ class RelayClient:
             except Exception as e:
                 print(f"[Cerver] Heartbeat failed: {e}")
                 self._tui_update(cerver_status="error")
+
+    async def _update_check_loop(self):
+        """Poll GitHub for a newer commit on main; if found, exec a fresh
+        uvx invocation that replaces this process. Lets installed relays
+        keep up with bug fixes without the user manually re-running
+        install.sh — same UX you get from a long-running daemon that
+        watches its own source.
+        """
+        # First check is delayed so we don't restart-loop right after a
+        # restart that's still propagating to GitHub.
+        await asyncio.sleep(60)
+        baseline = CURRENT_COMMIT_SHA
+        if not baseline:
+            print("[Update] no baseline commit sha — auto-update disabled")
+            return
+        api_url = f"https://api.github.com/repos/{RELAY_GITHUB_REPO}/commits/main"
+        while self._running:
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.get(api_url, headers={"Accept": "application/vnd.github+json"})
+                if resp.status_code == 200:
+                    latest_sha = resp.json().get("sha", "")
+                    if latest_sha and latest_sha != baseline:
+                        print(f"[Update] new commit on main ({latest_sha[:8]}); current={baseline[:8]}. Restarting...")
+                        self._tui_update(connection="updating")
+                        await self._exec_self_update()
+                        return
+                else:
+                    print(f"[Update] github poll {resp.status_code}; will retry")
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                print(f"[Update] poll error: {exc}")
+            await asyncio.sleep(UPDATE_POLL_INTERVAL)
+
+    async def _exec_self_update(self):
+        """Replace this process with a fresh `uvx --refresh ...` so the
+        next boot pulls the latest commit. uv re-resolves the git source
+        when --refresh is passed; without it the cached wheel sticks.
+        Argv preserved so flags (--cerver-url, --no-tui, --dir) carry over.
+        """
+        try:
+            uvx = shutil.which("uvx") or "uvx"
+            repo_url = f"git+https://github.com/{RELAY_GITHUB_REPO}.git"
+            # Drop the script name (sys.argv[0]) — uvx will produce a new one.
+            extra_args = sys.argv[1:]
+            cmd = [
+                uvx,
+                "--refresh",
+                "--from",
+                repo_url,
+                "branch-monkey-relay",
+                *extra_args,
+            ]
+            print(f"[Update] exec: {' '.join(cmd)}")
+            # Best-effort cleanup before exec — we don't await long here
+            # because os.execvp will replace the process anyway.
+            try:
+                self._running = False
+                await self._unregister_cerver_compute()
+            except Exception:
+                pass
+            os.execvp(cmd[0], cmd)
+        except Exception as exc:
+            print(f"[Update] self-update exec failed: {exc}")
+            # Fallback: exit so KeepAlive (launchd) restarts us. Without
+            # --refresh on launchd, the old wheel reloads — but at least
+            # we don't keep checking endlessly.
+            os._exit(0)
 
     async def _unregister_cerver_compute(self):
         client = self._ensure_cerver_client()
