@@ -1163,8 +1163,12 @@ class RelayClient:
         """Poll GitHub for a newer commit on main; if found, exec a fresh
         uvx invocation that replaces this process. Lets installed relays
         keep up with bug fixes without the user manually re-running
-        install.sh — same UX you get from a long-running daemon that
-        watches its own source.
+        install.sh.
+
+        Uses ETag/If-None-Match conditional requests so each unchanged
+        poll returns 304 and doesn't count against GitHub's anonymous
+        60 req/hour rate limit. With ETag, ~tens of relays at 10-min
+        intervals stay well under the cap.
         """
         # First check is delayed so we don't restart-loop right after a
         # restart that's still propagating to GitHub.
@@ -1174,17 +1178,40 @@ class RelayClient:
             print("[Update] no baseline commit sha — auto-update disabled")
             return
         api_url = f"https://api.github.com/repos/{RELAY_GITHUB_REPO}/commits/main"
+        last_etag: Optional[str] = None
         while self._running:
             try:
+                headers = {"Accept": "application/vnd.github+json"}
+                if last_etag:
+                    headers["If-None-Match"] = last_etag
                 async with httpx.AsyncClient(timeout=15) as client:
-                    resp = await client.get(api_url, headers={"Accept": "application/vnd.github+json"})
-                if resp.status_code == 200:
+                    resp = await client.get(api_url, headers=headers)
+                if resp.status_code == 304:
+                    # No change since last poll — doesn't count against
+                    # rate limit per GitHub's docs.
+                    pass
+                elif resp.status_code == 200:
+                    last_etag = resp.headers.get("ETag")
                     latest_sha = resp.json().get("sha", "")
                     if latest_sha and latest_sha != baseline:
                         print(f"[Update] new commit on main ({latest_sha[:8]}); current={baseline[:8]}. Restarting...")
                         self._tui_update(connection="updating")
                         await self._exec_self_update()
                         return
+                elif resp.status_code in (403, 429):
+                    # Rate-limited. Honor x-ratelimit-reset and back off.
+                    reset = resp.headers.get("x-ratelimit-reset")
+                    if reset:
+                        try:
+                            wait_for = max(60, int(reset) - int(time.time()) + 5)
+                            print(f"[Update] rate limited; waiting {wait_for}s")
+                            await asyncio.sleep(wait_for)
+                            continue
+                        except Exception:
+                            pass
+                    print(f"[Update] rate limited; backing off {UPDATE_POLL_INTERVAL * 2}s")
+                    await asyncio.sleep(UPDATE_POLL_INTERVAL * 2)
+                    continue
                 else:
                     print(f"[Update] github poll {resp.status_code}; will retry")
             except asyncio.CancelledError:
