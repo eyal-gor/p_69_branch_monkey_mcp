@@ -39,15 +39,21 @@ def build_provider_agent_payload(
     if isinstance(workload, str) and workload.strip():
         description_parts.append(f"workload: {workload.strip()}")
 
+    bootstrap_prompt = metadata.get("bootstrap_prompt")
+    # If cerver handed us a bootstrap prompt (e.g. from a session resume
+    # synthesizing context out of a prior transcript), the agent has work
+    # to do *now* — defer_start would leave it waiting forever for a /run
+    # call that never comes. Defer only when the caller has nothing for
+    # the agent to do yet.
     return {
         "title": title,
         "description": " | ".join(description_parts) if description_parts else None,
         "working_dir": metadata.get("working_dir"),
         "workflow": infer_provider_workflow(metadata),
         "branch": metadata.get("branch"),
-        "defer_start": True,
+        "defer_start": not bool(isinstance(bootstrap_prompt, str) and bootstrap_prompt.strip()),
         "cli_tool": metadata.get("cli_tool"),
-        "prompt": metadata.get("bootstrap_prompt"),
+        "prompt": bootstrap_prompt,
     }
 
 
