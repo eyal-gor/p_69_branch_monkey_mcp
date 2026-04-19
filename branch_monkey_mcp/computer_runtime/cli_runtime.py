@@ -21,8 +21,13 @@ def resolve_cli_provider(cli_tool: str) -> CliProvider:
     return get_provider(cli_tool)
 
 
-def build_process_env(cli_cmd) -> dict:
-    """Build the environment for a CLI command."""
+def build_process_env(cli_cmd, extra_env: Optional[dict] = None) -> dict:
+    """Build the environment for a CLI command.
+
+    extra_env: caller-supplied env vars (e.g. project-scoped secrets passed
+    through from kompany or cerver session metadata). Applied AFTER the CLI's
+    own env_inject so caller intent wins on conflict.
+    """
     env = os.environ.copy()
     for key in cli_cmd.env_overrides:
         env.pop(key, None)
@@ -32,6 +37,9 @@ def build_process_env(cli_cmd) -> dict:
 
     if cli_cmd.env_inject:
         env.update(cli_cmd.env_inject)
+
+    if extra_env:
+        env.update(extra_env)
 
     return env
 
@@ -54,9 +62,13 @@ def build_resume_cli_command(
     return provider.build_resume_command(message, session_id)
 
 
-def spawn_cli_subprocess(cli_cmd, cwd: str) -> subprocess.Popen:
-    """Spawn a CLI subprocess for the given command."""
-    env = build_process_env(cli_cmd)
+def spawn_cli_subprocess(cli_cmd, cwd: str, extra_env: Optional[dict] = None) -> subprocess.Popen:
+    """Spawn a CLI subprocess for the given command.
+
+    extra_env: project-scoped env vars (secrets, config) to layer on top of
+    the host's process env so the agent inherits them.
+    """
+    env = build_process_env(cli_cmd, extra_env=extra_env)
     return subprocess.Popen(
         cli_cmd.args,
         stdout=subprocess.PIPE,

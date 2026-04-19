@@ -111,6 +111,13 @@ async def create_provider_session(
 ) -> Dict[str, Any]:
     """Create a normalized provider session through the local runtime."""
     payload = build_provider_agent_payload(metadata or {})
+    # cerver passes project-scoped env vars (BUFFER_API_KEY, etc.) on
+    # metadata.env when provisioning. Forward them to the spawned CLI so
+    # the agent inherits them — the same hook secret_fetch reads from on
+    # the env backend.
+    extra_env = metadata.get("env") if isinstance(metadata, dict) else None
+    if extra_env is not None and not isinstance(extra_env, dict):
+        extra_env = None
     created = await agent_manager.create(
         task_title=payload["title"],
         task_description=payload["description"],
@@ -120,6 +127,7 @@ async def create_provider_session(
         branch=payload["branch"],
         defer_start=payload["defer_start"],
         cli_tool=payload["cli_tool"],
+        extra_env=extra_env,
     )
 
     agent_id = created.get("id")

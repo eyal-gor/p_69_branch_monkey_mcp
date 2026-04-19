@@ -59,6 +59,7 @@ class LocalAgent:
     exit_code: Optional[int] = None
     session_id: Optional[str] = None
     callback: Optional[Dict] = None  # Cron completion callback info
+    extra_env: Optional[Dict[str, str]] = None  # Project-scoped env vars (e.g. BUFFER_API_KEY) passed by kompany/cerver and inherited by the spawned CLI process.
 
 
 class LocalAgentManager:
@@ -133,7 +134,8 @@ class LocalAgentManager:
         branch: Optional[str] = None,
         defer_start: bool = False,
         callback: Optional[Dict] = None,
-        cli_tool: Optional[str] = None
+        cli_tool: Optional[str] = None,
+        extra_env: Optional[Dict[str, str]] = None,
     ) -> dict:
         """Create and optionally start a new local AI agent.
 
@@ -240,7 +242,8 @@ class LocalAgentManager:
                 branch_created=branch_created,
                 status="prepared",
                 cli_tool=provider.name,
-                callback=callback
+                callback=callback,
+                extra_env=extra_env,
             )
             self._agents[agent_id] = agent
             print(f"[LocalAgent] Session prepared (deferred start): {agent_id}")
@@ -275,7 +278,8 @@ class LocalAgentManager:
             branch_created=branch_created,
             status="starting",
             cli_tool=provider.name,
-            callback=callback
+            callback=callback,
+            extra_env=extra_env,
         )
 
         self._agents[agent_id] = agent
@@ -341,7 +345,7 @@ class LocalAgentManager:
         cli_cmd = build_run_cli_command(
             provider, final_prompt, system_prompt=system_prompt
         )
-        process = spawn_cli_subprocess(cli_cmd, agent.work_dir)
+        process = spawn_cli_subprocess(cli_cmd, agent.work_dir, extra_env=agent.extra_env)
 
         agent.pid = process.pid
         agent.process = process
@@ -666,7 +670,7 @@ class LocalAgentManager:
 
         print(f"[LocalAgent] Resuming session {agent.session_id} with {provider.display_name}")
 
-        process = spawn_cli_subprocess(cli_cmd, agent.work_dir)
+        process = spawn_cli_subprocess(cli_cmd, agent.work_dir, extra_env=agent.extra_env)
 
         agent.process = process
         agent.pid = process.pid

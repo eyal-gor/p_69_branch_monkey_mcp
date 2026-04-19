@@ -11,7 +11,7 @@ import tempfile
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -158,6 +158,10 @@ class CreateAgentRequest(BaseModel):
     # _push_event_to_cerver. Lets task / chat sessions persist transcripts
     # without depending on a connected frontend, same as cron via /run-agent.
     callback: Optional[CronCallback] = None
+    # Project-scoped env vars (e.g. BUFFER_API_KEY) that the spawned CLI
+    # process inherits. Lets kompany pass project secrets through to the
+    # agent without baking them into the relay host's shell env.
+    extra_env: Optional[Dict[str, str]] = None
 
 
 class RunAgentRequest(BaseModel):
@@ -168,6 +172,7 @@ class RunAgentRequest(BaseModel):
     working_dir: Optional[str] = None
     callback: Optional[CronCallback] = None
     cli_tool: Optional[str] = None  # 'claude' or 'codex'; defaults to 'claude'
+    extra_env: Optional[Dict[str, str]] = None
 
 
 class TaskExecuteRequest(BaseModel):
@@ -294,6 +299,7 @@ async def create_agent(request: CreateAgentRequest):
         defer_start=request.defer_start,
         cli_tool=request.cli_tool,
         callback=callback_dict,
+        extra_env=request.extra_env,
     )
 
 
@@ -327,7 +333,8 @@ async def run_agent(request: RunAgentRequest):
         system_prompt=request.system_prompt,
         skip_branch=True,
         callback=callback_dict,
-        cli_tool=request.cli_tool
+        cli_tool=request.cli_tool,
+        extra_env=request.extra_env,
     )
 
     return {
