@@ -556,6 +556,11 @@ async def send_input(agent_id: str, request: InputRequest):
         await agent_manager.spawn_cli_process(agent_id, message, image_paths)
         return {"success": True, "action": "started", "cli_tool": agent.get("cli_tool"), "images": len(image_paths)}
 
+    print(
+        f"[send_input] agent={agent_id} status={agent.get('status')} "
+        f"session_id={agent.get('session_id')} cli_tool={agent.get('cli_tool')}"
+    )
+
     if agent["status"] in ("paused", "completed", "failed"):
         # If we have a Claude CLI session id, resume it (cheaper, preserves
         # tool history). Otherwise — common for fresh chat sessions whose
@@ -571,12 +576,12 @@ async def send_input(agent_id: str, request: InputRequest):
     if agent["status"] == "running":
         raise HTTPException(
             status_code=400,
-            detail="Agent is running. Wait for it to complete before sending another message."
+            detail=f"Agent is running (status={agent['status']}, sid={agent.get('session_id')}). Wait for it to complete before sending another message."
         )
 
     raise HTTPException(
         status_code=400,
-        detail="No active session. Start a new task."
+        detail=f"No active session (status={agent.get('status')}, sid={agent.get('session_id')}). Start a new task."
     )
 
 
