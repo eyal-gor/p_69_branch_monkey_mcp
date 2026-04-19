@@ -358,17 +358,26 @@ class LocalAgentManager:
         )
 
     async def spawn_cli_process(self, agent_id: str, message: str, image_paths: List[str] = None) -> None:
-        """Spawn a CLI process for a prepared session (first message).
+        """Spawn a CLI process from a quiescent agent.
 
-        This is called when send_input detects a "prepared" agent.
-        Builds the prompt from the message and starts the CLI process.
+        Called by send_input when:
+          - status == "prepared" (first message of a deferred session)
+          - status in (completed, failed, paused) and no session_id
+            (fresh chat whose initial run finished before Claude emitted
+             session_id, so we can't /resume — start over instead)
+
+        Refuses only when an agent is *currently* running, since spawning
+        a second CLI on top of a live one would race for the worktree.
         """
         agent = self._agents.get(agent_id)
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found")
 
-        if agent.status != "prepared":
-            raise HTTPException(status_code=400, detail=f"Agent is not in prepared state (status: {agent.status})")
+        if agent.status == "running":
+            raise HTTPException(
+                status_code=400,
+                detail=f"Cannot spawn — agent is already running (status: {agent.status})"
+            )
 
         # Build the final prompt with worktree/workspace context + user message
         final_prompt = self._build_prompt(
