@@ -556,9 +556,17 @@ async def send_input(agent_id: str, request: InputRequest):
         await agent_manager.spawn_cli_process(agent_id, message, image_paths)
         return {"success": True, "action": "started", "cli_tool": agent.get("cli_tool"), "images": len(image_paths)}
 
-    if agent["status"] in ("paused", "completed", "failed") and agent.get("session_id"):
-        await agent_manager.resume_session(agent_id, message, image_paths)
-        return {"success": True, "action": "resumed", "images": len(image_paths)}
+    if agent["status"] in ("paused", "completed", "failed"):
+        # If we have a Claude CLI session id, resume it (cheaper, preserves
+        # tool history). Otherwise — common for fresh chat sessions whose
+        # initial run finished before emitting the `init` event with the
+        # session_id — spawn a brand-new CLI process with the user's input
+        # as the prompt. Either way the user's first message lands.
+        if agent.get("session_id"):
+            await agent_manager.resume_session(agent_id, message, image_paths)
+            return {"success": True, "action": "resumed", "images": len(image_paths)}
+        await agent_manager.spawn_cli_process(agent_id, message, image_paths)
+        return {"success": True, "action": "started", "images": len(image_paths)}
 
     if agent["status"] == "running":
         raise HTTPException(
