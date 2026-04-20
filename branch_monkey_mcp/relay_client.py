@@ -927,6 +927,11 @@ class RelayClient:
             org_name=self.org_name,
         )
 
+        # Startup pull — match the cerver-only path. If the wheel uvx
+        # cached is behind main, exec --refresh before doing any work.
+        if await self._check_for_updates_once():
+            return
+
         self._running = True
         await self._register_cerver_compute()
 
@@ -1159,6 +1164,31 @@ class RelayClient:
                 print(f"[Cerver] Heartbeat failed: {e}")
                 self._tui_update(cerver_status="error")
 
+    async def _check_for_updates_once(self) -> bool:
+        """One-shot check: is the live `main` ahead of CURRENT_COMMIT_SHA?
+        If yes, exec self with --refresh so the new commit takes effect
+        before any work runs. Returns True if it triggered the exec
+        (caller should bail; control will not return). False if up-to-date,
+        no baseline known, or check failed.
+        """
+        baseline = CURRENT_COMMIT_SHA
+        if not baseline:
+            return False
+        api_url = f"https://api.github.com/repos/{RELAY_GITHUB_REPO}/commits/main"
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(api_url, headers={"Accept": "application/vnd.github+json"})
+            if resp.status_code != 200:
+                return False
+            latest_sha = resp.json().get("sha", "")
+            if latest_sha and latest_sha != baseline:
+                print(f"[Update] startup check: new commit {latest_sha[:8]} (running {baseline[:8]}). Pulling...")
+                await self._exec_self_update()
+                return True
+        except Exception as exc:
+            print(f"[Update] startup check skipped: {exc}")
+        return False
+
     async def _update_check_loop(self):
         """Poll GitHub for a newer commit on main; if found, exec a fresh
         uvx invocation that replaces this process. Lets installed relays
@@ -1267,10 +1297,20 @@ class RelayClient:
             print("[Cerver] Missing Cerver URL. Use --cerver-url or CERVER_GATEWAY_URL.")
             return
 
+        # Startup pull: if a newer commit exists on main, exec --refresh
+        # before doing any registration. Without this, plain `uvx ...`
+        # (no --refresh) loads the cached wheel forever even though
+        # `--cerver-only` skips the in-process update loop below.
+        if await self._check_for_updates_once():
+            return  # _exec_self_update has replaced the process
+
         self._running = True
         self._tui_update(cerver_only=True)
         await self._register_cerver_compute()
         self._cerver_heartbeat_task = asyncio.create_task(self._cerver_heartbeat_loop())
+        # Background poll: keep the running relay up to date without
+        # requiring restarts. Same loop the dual-mode path uses.
+        self._update_check_task = asyncio.create_task(self._update_check_loop())
 
         try:
             while self._running:
