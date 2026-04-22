@@ -40,20 +40,26 @@ def build_provider_agent_payload(
         description_parts.append(f"workload: {workload.strip()}")
 
     bootstrap_prompt = metadata.get("bootstrap_prompt")
+    # Passive shadows (kompany's transcript receivers) must NEVER auto-spawn
+    # a CLI — kompany already spawned the real agent via /local-claude/agents
+    # and a second CLI here doubles Anthropic API calls and triggers
+    # api_retry storms. metadata.passive=True forces defer_start regardless.
+    is_passive = bool(metadata.get("passive") or metadata.get("shadow"))
+    has_bootstrap = bool(isinstance(bootstrap_prompt, str) and bootstrap_prompt.strip())
     # If cerver handed us a bootstrap prompt (e.g. from a session resume
     # synthesizing context out of a prior transcript), the agent has work
     # to do *now* — defer_start would leave it waiting forever for a /run
     # call that never comes. Defer only when the caller has nothing for
-    # the agent to do yet.
+    # the agent to do yet, or when the session is explicitly passive.
     return {
         "title": title,
         "description": " | ".join(description_parts) if description_parts else None,
         "working_dir": metadata.get("working_dir"),
         "workflow": infer_provider_workflow(metadata),
         "branch": metadata.get("branch"),
-        "defer_start": not bool(isinstance(bootstrap_prompt, str) and bootstrap_prompt.strip()),
+        "defer_start": is_passive or not has_bootstrap,
         "cli_tool": metadata.get("cli_tool"),
-        "prompt": bootstrap_prompt,
+        "prompt": None if is_passive else bootstrap_prompt,
     }
 
 
