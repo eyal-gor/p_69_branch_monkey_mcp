@@ -29,7 +29,10 @@ from ..computer_runtime.execution import (
     extract_result_from_output_buffer,
     process_provider_output_text,
 )
-from ..cerver_connect_transport import publish_stream_event_nowait
+from ..cerver_connect_transport import (
+    get_active_transport,
+    publish_stream_event_nowait,
+)
 from .cli_providers import CliProvider
 from .config import get_default_working_dir
 from .git_utils import is_git_repo, get_current_branch, generate_branch_name
@@ -577,6 +580,14 @@ class LocalAgentManager:
         cerver_url = callback.get("cerver_url")
         cerver_token = callback.get("cerver_api_token")
         cerver_session_id = callback.get("cerver_session_id")
+        # Fallback: when the agent was spawned via cerver itself (provider.py),
+        # the callback only has cerver_session_id. Reuse the relay's own
+        # connect-transport credentials instead of refusing to push.
+        if cerver_session_id and not (cerver_url and cerver_token):
+            transport = get_active_transport()
+            if transport is not None:
+                cerver_url = cerver_url or transport.cerver_url
+                cerver_token = cerver_token or transport.api_token
         if not (cerver_url and cerver_token and cerver_session_id):
             return
 

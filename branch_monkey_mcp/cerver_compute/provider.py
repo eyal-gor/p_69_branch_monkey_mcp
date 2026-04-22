@@ -124,6 +124,16 @@ async def create_provider_session(
     extra_env = metadata.get("env") if isinstance(metadata, dict) else None
     if extra_env is not None and not isinstance(extra_env, dict):
         extra_env = None
+    # When cerver hands us a session_id at provision time, attach it as the
+    # agent's callback so _publish_stream_to_cerver can tag stream events
+    # with this session — i.e. so subscribers to /v2/sessions/<id>/stream/ws
+    # actually receive anything. The cerver_url + cerver_api_token aren't
+    # known here but agent_manager falls back to the active connect-transport
+    # for those when only cerver_session_id is set.
+    cerver_session_id = (
+        metadata.get("cerver_session_id") if isinstance(metadata, dict) else None
+    )
+    callback = {"cerver_session_id": cerver_session_id} if cerver_session_id else None
     created = await agent_manager.create(
         task_title=payload["title"],
         task_description=payload["description"],
@@ -134,6 +144,7 @@ async def create_provider_session(
         defer_start=payload["defer_start"],
         cli_tool=payload["cli_tool"],
         extra_env=extra_env,
+        callback=callback,
     )
 
     agent_id = created.get("id")
