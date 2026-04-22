@@ -158,3 +158,59 @@ class CerverConnectTransport:
         if self._ws is None:
             raise RuntimeError("Cerver connect websocket is not connected")
         await self._ws.send(json.dumps(payload))
+
+    async def publish_stream_event(self, session_id: str, event: Dict[str, Any]) -> None:
+        """Forward one CLI stream event to cerver for live fan-out.
+
+        Cerver routes the event to every subscriber of the session's
+        /v2/sessions/<id>/stream/ws WebSocket. Fire-and-forget: any send
+        failure is dropped silently — the durable copy goes via the HTTP
+        transcript push, this WS path is for low-latency live updates only.
+        """
+        if self._ws is None or not session_id:
+            return
+        try:
+            await self._send_json(
+                {
+                    "type": "stream_event",
+                    "session_id": session_id,
+                    "event": event,
+                }
+            )
+        except Exception:
+            # WS may be mid-reconnect — drop the live event, the HTTP
+            # transcript push still preserves it for refresh-load.
+            pass
+
+
+# ── Module-level active-transport registry ─────────────────────────────────
+# The relay only ever runs one CerverConnectTransport at a time. Modules that
+# need to publish stream events (e.g. agent_manager) shouldn't have to thread
+# the transport through their constructors — they read the active one here.
+
+_active_transport: Optional["CerverConnectTransport"] = None
+
+
+def set_active_transport(transport: Optional["CerverConnectTransport"]) -> None:
+    global _active_transport
+    _active_transport = transport
+
+
+def get_active_transport() -> Optional["CerverConnectTransport"]:
+    return _active_transport
+
+
+def publish_stream_event_nowait(session_id: str, event: Dict[str, Any]) -> None:
+    """Fire-and-forget convenience: schedules a publish on the active transport
+    if one exists. Safe to call from sync contexts — schedules a task on the
+    running loop, swallows errors. Returns immediately.
+    """
+    transport = _active_transport
+    if transport is None or not session_id:
+        return
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(transport.publish_stream_event(session_id, event))
+    except RuntimeError:
+        # No running loop — drop silently.
+        pass

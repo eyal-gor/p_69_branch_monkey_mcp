@@ -29,6 +29,7 @@ from ..computer_runtime.execution import (
     extract_result_from_output_buffer,
     process_provider_output_text,
 )
+from ..cerver_connect_transport import publish_stream_event_nowait
 from .cli_providers import CliProvider
 from .config import get_default_working_dir
 from .git_utils import is_git_repo, get_current_branch, generate_branch_name
@@ -433,7 +434,10 @@ class LocalAgentManager:
                     print(f"[LocalAgent] Got session_id: {agent.session_id}")
                 await broadcast_to_agent_listeners(agent, event)
 
-                # Push every event to cerver in the background (fire-and-forget).
+                # Live: publish to cerver-connect for browser/CLI subscribers.
+                self._publish_stream_to_cerver(agent, event)
+
+                # Durable: push every event to cerver's transcript (HTTP).
                 # Lets headless cron / workflow runs persist their full
                 # transcript instead of just the final output.
                 self._push_event_to_cerver(agent, event)
@@ -468,38 +472,29 @@ class LocalAgentManager:
             agent.session_id = None  # Don't keep session — allows cleanup
             print(f"[LocalAgent] Cron agent {agent.id} {agent.status} (exit={agent.exit_code})")
 
-            await broadcast_to_agent_listeners(
-                agent,
-                {
-                    "type": "exit",
-                    "exit_code": agent.exit_code,
-                },
-            )
+            exit_event = {"type": "exit", "exit_code": agent.exit_code}
+            await broadcast_to_agent_listeners(agent, exit_event)
+            self._publish_stream_to_cerver(agent, exit_event)
 
             await self._fire_callback(agent)
         elif agent.session_id:
             agent.status = "paused"
             print(f"[LocalAgent] Agent {agent.id} paused, session can be resumed")
 
-            await broadcast_to_agent_listeners(
-                agent,
-                {
-                    "type": "paused",
-                    "exit_code": agent.exit_code,
-                    "session_id": agent.session_id,
-                    "can_resume": True,
-                },
-            )
+            paused_event = {
+                "type": "paused",
+                "exit_code": agent.exit_code,
+                "session_id": agent.session_id,
+                "can_resume": True,
+            }
+            await broadcast_to_agent_listeners(agent, paused_event)
+            self._publish_stream_to_cerver(agent, paused_event)
         else:
             agent.status = "completed" if agent.exit_code == 0 else "failed"
 
-            await broadcast_to_agent_listeners(
-                agent,
-                {
-                    "type": "exit",
-                    "exit_code": agent.exit_code,
-                },
-            )
+            exit_event = {"type": "exit", "exit_code": agent.exit_code}
+            await broadcast_to_agent_listeners(agent, exit_event)
+            self._publish_stream_to_cerver(agent, exit_event)
 
     def _extract_result(self, agent: LocalAgent) -> str:
         """Extract the final result text from the agent's output buffer.
@@ -608,6 +603,20 @@ class LocalAgentManager:
     def _push_event_to_cerver(self, agent: LocalAgent, event: Dict) -> None:
         """Push one CLI stream event to cerver as transcript entries."""
         self._post_transcript_entries(agent, self._event_to_cerver_entries(event))
+
+    def _publish_stream_to_cerver(self, agent: LocalAgent, event: Dict) -> None:
+        """Push one CLI stream event over the live cerver-connect WebSocket.
+
+        Cerver fans the event out to every subscriber of this session's
+        /v2/sessions/<id>/stream/ws — i.e. all open browser tabs and CLI
+        clients. This is the live-streaming side; the durable copy is the
+        HTTP transcript push in _push_event_to_cerver.
+        """
+        callback = agent.callback or {}
+        cerver_session_id = callback.get("cerver_session_id")
+        if not cerver_session_id:
+            return
+        publish_stream_event_nowait(cerver_session_id, event)
 
     def _push_user_message(self, agent: LocalAgent, content: str) -> None:
         """Push a user-side message (initial prompt or follow-up input) so the

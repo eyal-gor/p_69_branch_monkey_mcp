@@ -46,7 +46,7 @@ import httpx
 import websockets
 
 from .cerver_compute import CerverComputeClient
-from .cerver_connect_transport import CerverConnectTransport
+from .cerver_connect_transport import CerverConnectTransport, set_active_transport
 from .connection_logger import connection_logger
 from .kompany_local_transport.relay_forwarding import (
     build_local_url,
@@ -1099,6 +1099,9 @@ class RelayClient:
             return
 
         self._tui_update(cerver_status="connecting")
+        # Register so agent_manager can publish stream events without a direct
+        # dependency on the transport instance.
+        set_active_transport(transport)
         self._cerver_connect_task = asyncio.create_task(transport.run())
 
     async def _stop_cerver_connect_transport(self):
@@ -1116,6 +1119,7 @@ class RelayClient:
             except Exception:
                 pass
         self._cerver_connect_transport = None
+        set_active_transport(None)
 
     async def _register_cerver_compute(self):
         client = self._ensure_cerver_client()
