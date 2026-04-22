@@ -1,8 +1,12 @@
 """
-Kompany ASCII art logo.
+Cerver / Kompany ASCII art logo.
 
 Compact half-block pixel font, 2 lines tall.
 Animated with smooth shimmer effect using 256-color gradient.
+
+The relay is a cerver runtime — `cerver` is the platform brand. We render
+that as the big logo and let `for kompany` live as the subtitle in the TUI
+so both identities are present without competing for the eye.
 
 Each letter encodes a 4-pixel-tall design in 2 display rows:
   █ = both top and bottom pixels filled
@@ -19,6 +23,8 @@ import math
 # ── letter definitions (2 display rows, half-block encoded) ──
 
 # fmt: off
+# Original kompany letters — kept around for the subtitle render path
+# and so anyone landing here can compare style.
 _k = ["█ ▄▀", "█▀▄ "]
 _o = ["▄▀▀▄", "▀▄▄▀"]
 _m = ["█▀▄▀█", "█ ▀ █"]
@@ -26,9 +32,15 @@ _p = ["█▀▀▄", "█▀▀ "]
 _a = ["▄▀▀▄", "█▀▀█"]
 _n = ["█▀▀▄", "█  █"]
 _y = ["█  █", " ▀▀ "]
+
+# Cerver letters — same half-block style.
+_c = ["█▀▀▀", "█▄▄▄"]
+_e = ["██▀▀", "██▄▄"]
+_r = ["█▀▀▄", "█▀█ "]
+_v = ["█  █", " ██ "]
 # fmt: on
 
-_LETTERS = [_k, _o, _m, _p, _a, _n, _y]
+_LETTERS = [_c, _e, _r, _v, _e, _r]
 _GAP = 1
 
 # Build static logo lines
@@ -42,7 +54,8 @@ LOGO_HEIGHT = len(LOGO)
 
 # ── 256-color gradient for smooth animation ──
 
-# Indigo gradient: dark → bright → white (matching brand #6366f1)
+# Indigo gradient: dark → bright → white. Reads well against the dark
+# terminal bg and matches both the kompany #6366f1 and cerver palettes.
 GRADIENT_COLORS = [56, 57, 63, 99, 105, 147, 189, 231]
 
 

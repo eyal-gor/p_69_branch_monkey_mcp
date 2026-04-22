@@ -433,26 +433,26 @@ class RelayTUI:
         bar_w = min(50, w - 4)
         y = 1
 
-        # Header — animated logo or compact fallback
+        # Header — animated CERVER logo with kompany-relay subtitle.
+        # The big logo is the platform brand; the subtitle pins down which
+        # variant of the runtime is actually executing.
         ver = f"v{s['version']}" if s["version"] else ""
         if w >= LOGO_WIDTH + 6:
-            # Text logo only (no room for crew)
             self._draw_animated_logo(stdscr, y, col)
             y += LOGO_HEIGHT
-            subtitle = f"cerver relay {ver}"
-            tagline = "for kompany"
+            subtitle = f"kompany relay {ver}".rstrip()
             self._put(stdscr, y, col + LOGO_WIDTH - len(subtitle), subtitle, self._dim())
-            y += 1
-            self._put(stdscr, y, col + LOGO_WIDTH - len(tagline), tagline, self._dim())
             y += 1
             self._hline(stdscr, y, col, bar_w)
             y += 2
         else:
-            self._put(stdscr, y, col, "cerver relay", self._bold() | self._green())
-            self._put(stdscr, y, col + 14, ver, self._dim())
+            self._put(stdscr, y, col, "cerver", self._bold() | self._green())
+            self._put(stdscr, y, col + 7, "·", self._dim())
+            self._put(stdscr, y, col + 9, "kompany relay", self._dim())
             y += 1
-            self._put(stdscr, y, col, "for kompany", self._dim())
-            y += 1
+            if ver:
+                self._put(stdscr, y, col, ver, self._dim())
+                y += 1
             self._hline(stdscr, y, col, bar_w)
             y += 2
 
