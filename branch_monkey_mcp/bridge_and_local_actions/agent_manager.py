@@ -64,6 +64,12 @@ class LocalAgent:
     session_id: Optional[str] = None
     callback: Optional[Dict] = None  # Cron completion callback info
     extra_env: Optional[Dict[str, str]] = None  # Project-scoped env vars (e.g. BUFFER_API_KEY) passed by kompany/cerver and inherited by the spawned CLI process.
+    # Cron-style runs complete on exit; chat-style runs pause and wait for
+    # follow-up input. Both can carry a callback (chat needs one to publish
+    # stream events to cerver), so we can't use callback presence as the
+    # signal. Defaulting to False keeps interactive sessions alive — only
+    # explicit one-shot triggers (run-agent, etc.) flip this on.
+    complete_on_exit: bool = False
 
 
 class LocalAgentManager:
@@ -140,6 +146,7 @@ class LocalAgentManager:
         callback: Optional[Dict] = None,
         cli_tool: Optional[str] = None,
         extra_env: Optional[Dict[str, str]] = None,
+        complete_on_exit: bool = False,
     ) -> dict:
         """Create and optionally start a new local AI agent.
 
@@ -248,6 +255,7 @@ class LocalAgentManager:
                 cli_tool=provider.name,
                 callback=callback,
                 extra_env=extra_env,
+                complete_on_exit=complete_on_exit,
             )
             self._agents[agent_id] = agent
             print(f"[LocalAgent] Session prepared (deferred start): {agent_id}")
@@ -284,6 +292,7 @@ class LocalAgentManager:
             cli_tool=provider.name,
             callback=callback,
             extra_env=extra_env,
+            complete_on_exit=complete_on_exit,
         )
 
         self._agents[agent_id] = agent
@@ -468,12 +477,15 @@ class LocalAgentManager:
         except Exception as exc:
             print(f"[LocalAgent] final flush to cerver failed: {exc}")
 
-        # Cron agents (with callback) should complete, not pause — they don't need
-        # session resumption and would otherwise linger in the compute pool.
-        if agent.callback:
+        # One-shot agents (cron / run-agent) complete on exit and clear their
+        # session so they don't linger in the pool. Interactive agents (chat
+        # via /agents) pause instead so the user's next message resumes them.
+        # The signal is `complete_on_exit`, not callback presence — chats now
+        # also carry callbacks (for stream publishing) but must NOT complete.
+        if agent.complete_on_exit:
             agent.status = "completed" if agent.exit_code == 0 else "failed"
             agent.session_id = None  # Don't keep session — allows cleanup
-            print(f"[LocalAgent] Cron agent {agent.id} {agent.status} (exit={agent.exit_code})")
+            print(f"[LocalAgent] One-shot agent {agent.id} {agent.status} (exit={agent.exit_code})")
 
             exit_event = {"type": "exit", "exit_code": agent.exit_code}
             await broadcast_to_agent_listeners(agent, exit_event)

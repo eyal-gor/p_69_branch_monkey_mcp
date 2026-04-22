@@ -335,6 +335,10 @@ async def run_agent(request: RunAgentRequest):
         callback=callback_dict,
         cli_tool=request.cli_tool,
         extra_env=request.extra_env,
+        # /run-agent is the one-shot/cron entry point — agent should
+        # complete and clean up after the prompt finishes, not wait for
+        # interactive follow-ups.
+        complete_on_exit=True,
     )
 
     return {
