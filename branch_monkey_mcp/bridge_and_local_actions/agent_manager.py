@@ -70,6 +70,11 @@ class LocalAgent:
     # signal. Defaulting to False keeps interactive sessions alive — only
     # explicit one-shot triggers (run-agent, etc.) flip this on.
     complete_on_exit: bool = False
+    # Claude CLI streams each assistant message multiple times (incremental
+    # chunks + final). We push to cerver's transcript every event, so without
+    # this set the transcript ends up with N copies. Track msg_ids that have
+    # already been written and skip subsequent occurrences.
+    _pushed_msg_ids: set = field(default_factory=set)
 
 
 class LocalAgentManager:
@@ -624,8 +629,37 @@ class LocalAgentManager:
             pass
 
     def _push_event_to_cerver(self, agent: LocalAgent, event: Dict) -> None:
-        """Push one CLI stream event to cerver as transcript entries."""
+        """Push one CLI stream event to cerver as transcript entries.
+
+        Deduplicates by Claude CLI's `message.id` so the same assistant
+        message emitted multiple times (streaming chunks + final) doesn't
+        produce duplicated transcript entries on cerver.
+        """
+        msg_id = self._extract_message_id(event)
+        if msg_id:
+            if msg_id in agent._pushed_msg_ids:
+                return
+            agent._pushed_msg_ids.add(msg_id)
         self._post_transcript_entries(agent, self._event_to_cerver_entries(event))
+
+    def _extract_message_id(self, event: Dict) -> Optional[str]:
+        """Pull `message.id` out of a CLI stream event, unwrapping the outer
+        `{type: "output", data: <json>}` envelope when present.
+        """
+        try:
+            inner = event
+            if event.get("type") == "output" and isinstance(event.get("data"), str):
+                inner = json.loads(event["data"])
+            if not isinstance(inner, dict):
+                return None
+            msg = inner.get("message")
+            if isinstance(msg, dict):
+                mid = msg.get("id")
+                if isinstance(mid, str) and mid:
+                    return mid
+            return None
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            return None
 
     def _publish_stream_to_cerver(self, agent: LocalAgent, event: Dict) -> None:
         """Push one CLI stream event over the live cerver-connect WebSocket.
