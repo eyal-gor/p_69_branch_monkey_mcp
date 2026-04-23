@@ -606,13 +606,30 @@ class LocalAgentManager:
                 cerver_url = cerver_url or transport.cerver_url
                 cerver_token = cerver_token or transport.api_token
         if not (cerver_url and cerver_token and cerver_session_id):
+            # Diagnostic: callbacks ship in from /run-agent (cron) but were
+            # silently dropped here when any field was missing. Log once per
+            # agent so future runs surface the actual cause instead of a
+            # mysterious empty transcript on cerver.
+            if not getattr(agent, "_logged_skip", False):
+                missing = [
+                    name for name, val in (
+                        ("cerver_url", cerver_url),
+                        ("cerver_api_token", cerver_token),
+                        ("cerver_session_id", cerver_session_id),
+                    ) if not val
+                ]
+                print(
+                    f"[LocalAgent] transcript push skipped for agent={agent.id} "
+                    f"task={agent.task_title}: missing {missing}"
+                )
+                agent._logged_skip = True
             return
 
         async def _push():
             import httpx
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
-                    await client.post(
+                    resp = await client.post(
                         f"{cerver_url.rstrip('/')}/v2/sessions/{cerver_session_id}/transcript",
                         json={"entries": entries},
                         headers={
@@ -620,6 +637,14 @@ class LocalAgentManager:
                             "Content-Type": "application/json",
                         },
                     )
+                    if resp.status_code >= 400:
+                        # Surface non-2xx so we don't silently lose transcripts
+                        # to auth/permission/shape errors on the cerver side.
+                        body_preview = resp.text[:200] if resp.text else ""
+                        print(
+                            f"[LocalAgent] cerver transcript push {resp.status_code} "
+                            f"for session={cerver_session_id}: {body_preview}"
+                        )
             except Exception as exc:
                 print(f"[LocalAgent] cerver transcript push failed: {exc}")
 
