@@ -37,18 +37,26 @@ red()   { printf "\033[31m%s\033[0m\n" "$*"; }
 # ── 1. Prompt (silent for the secret token) ────────────────────────────
 cyan "Infisical setup — values won't be echoed back"
 
-read -r -p "INFISICAL_PROJECT_ID (UUID from URL): " PROJECT_ID
+# Read from /dev/tty explicitly so prompts work when the script is piped
+# from curl (stdin is consumed by the pipe). Falls back gracefully if
+# /dev/tty isn't available (rare — true non-interactive contexts).
+if [[ ! -r /dev/tty ]]; then
+  red "no controlling terminal — re-run interactively (download first, then bash)"
+  exit 1
+fi
+
+read -r -p "INFISICAL_PROJECT_ID (UUID from URL): " PROJECT_ID < /dev/tty
 [[ -z "$PROJECT_ID" ]] && { red "project id required"; exit 1; }
 
-read -r -p "INFISICAL_ENV [dev]: " ENVNAME
+read -r -p "INFISICAL_ENV [dev]: " ENVNAME < /dev/tty
 ENVNAME="${ENVNAME:-dev}"
 
-read -r -s -p "INFISICAL_TOKEN (paste; hidden): " TOKEN; echo
+read -r -s -p "INFISICAL_TOKEN (paste; hidden): " TOKEN < /dev/tty; echo
 [[ -z "$TOKEN" ]] && { red "token required"; exit 1; }
 
 CLIENT_ID=""
 if [[ "$TOKEN" != st.* ]]; then
-  read -r -p "INFISICAL_CLIENT_ID (universal-auth client id): " CLIENT_ID
+  read -r -p "INFISICAL_CLIENT_ID (universal-auth client id): " CLIENT_ID < /dev/tty
   [[ -z "$CLIENT_ID" ]] && { red "client id required for non-st. tokens"; exit 1; }
 fi
 
