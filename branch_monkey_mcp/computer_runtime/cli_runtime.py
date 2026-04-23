@@ -14,6 +14,7 @@ import subprocess
 from typing import Optional
 
 from ..bridge_and_local_actions.cli_providers import CliProvider, get_provider
+from ..infisical_client import get_secrets_sync, is_configured as infisical_configured
 
 
 def resolve_cli_provider(cli_tool: str) -> CliProvider:
@@ -24,9 +25,14 @@ def resolve_cli_provider(cli_tool: str) -> CliProvider:
 def build_process_env(cli_cmd, extra_env: Optional[dict] = None) -> dict:
     """Build the environment for a CLI command.
 
+    Layering, lowest → highest precedence:
+      1. host process env (os.environ)
+      2. cli_cmd.env_inject (provider-specific overrides)
+      3. Infisical-fetched secrets (cached by infisical_client)
+      4. extra_env (per-call caller intent — wins on conflict)
+
     extra_env: caller-supplied env vars (e.g. project-scoped secrets passed
-    through from kompany or cerver session metadata). Applied AFTER the CLI's
-    own env_inject so caller intent wins on conflict.
+    through from kompany or cerver session metadata).
     """
     env = os.environ.copy()
     for key in cli_cmd.env_overrides:
@@ -37,6 +43,15 @@ def build_process_env(cli_cmd, extra_env: Optional[dict] = None) -> dict:
 
     if cli_cmd.env_inject:
         env.update(cli_cmd.env_inject)
+
+    # Layer Infisical-fetched secrets on top of host env so a rotated
+    # ANTHROPIC_API_KEY in Infisical reaches the next CLI spawn without a
+    # relay restart. extra_env still takes precedence so the caller's
+    # explicit per-session intent wins.
+    if infisical_configured():
+        infisical_env = get_secrets_sync()
+        if infisical_env:
+            env.update(infisical_env)
 
     if extra_env:
         env.update(extra_env)

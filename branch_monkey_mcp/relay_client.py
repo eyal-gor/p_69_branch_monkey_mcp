@@ -948,6 +948,7 @@ class RelayClient:
         self._local_stats_task = asyncio.create_task(self._local_stats_loop())
         self._cerver_heartbeat_task = asyncio.create_task(self._cerver_heartbeat_loop())
         self._update_check_task = asyncio.create_task(self._update_check_loop())
+        self._infisical_refresh_task = asyncio.create_task(self._infisical_refresh_loop())
 
         try:
             # Keep running until stopped
@@ -1193,6 +1194,27 @@ class RelayClient:
             print(f"[Update] startup check skipped: {exc}")
         return False
 
+    async def _infisical_refresh_loop(self):
+        """Keep the Infisical secrets cache warm.
+
+        Skips entirely if INFISICAL_TOKEN/INFISICAL_PROJECT_ID aren't set —
+        Infisical is opt-in and the relay falls back to host process env.
+        Otherwise refreshes on the client's TTL (5 min by default) so a
+        rotated key reaches the next CLI spawn within that window.
+        """
+        from .infisical_client import get_secrets, is_configured
+        if not is_configured():
+            return
+        # Initial fetch immediately so the first agent spawn after boot
+        # already has Infisical-managed secrets.
+        await get_secrets(force=True)
+        while self._running:
+            await asyncio.sleep(300)
+            try:
+                await get_secrets(force=True)
+            except Exception as exc:
+                print(f"[Infisical] refresh error: {exc}")
+
     async def _update_check_loop(self):
         """Poll GitHub for a newer commit on main; if found, exec a fresh
         uvx invocation that replaces this process. Lets installed relays
@@ -1315,6 +1337,7 @@ class RelayClient:
         # Background poll: keep the running relay up to date without
         # requiring restarts. Same loop the dual-mode path uses.
         self._update_check_task = asyncio.create_task(self._update_check_loop())
+        self._infisical_refresh_task = asyncio.create_task(self._infisical_refresh_loop())
 
         try:
             while self._running:
