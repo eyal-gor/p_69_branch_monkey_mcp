@@ -729,37 +729,71 @@ class LocalAgentManager:
             agent._push_stats["pushed"] += len(entries)
             url = f"{target['url'].rstrip('/')}/v2/sessions/{target['session_id']}/transcript"
             agent._last_push_url = url
+
+            # Retry budget for 404 / 5xx / network errors. Concretely
+            # protects against the v319-confirmed race where
+            # _push_user_message fires inside the cerver_compute provider
+            # callback while cerver's session-creation write hasn't yet
+            # committed in Postgres. Cerver becomes consistent within ~1-2s.
+            # 404s on this endpoint are ALWAYS retryable: either the
+            # session truly doesn't exist (in which case all pushes will
+            # 404 forever and we give up after the budget) or it does and
+            # the read replica caught up.
+            backoffs = [0.2, 0.4, 0.8, 1.5, 2.5]  # ~5.4s total
+            attempts = 0
+            last_status: Optional[int] = None
+            last_body = ""
+            last_exc: Optional[Exception] = None
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
-                    resp = await client.post(
-                        url,
-                        json={"entries": entries},
-                        headers={
-                            "Authorization": f"Bearer {target['token']}",
-                            "Content-Type": "application/json",
-                        },
-                    )
-                    body_preview = resp.text[:300] if resp.text else ""
-                    if resp.status_code < 300:
-                        agent._push_stats["http_2xx"] += len(entries)
-                    elif resp.status_code < 500:
-                        agent._push_stats["http_4xx"] += len(entries)
-                        err = f"{resp.status_code} {url}: {body_preview}"
-                        agent._push_errors.append(err)
-                        agent._push_errors[:] = agent._push_errors[-5:]
-                        print(f"[LocalAgent] transcript push {err}")
-                    else:
-                        agent._push_stats["http_5xx"] += len(entries)
-                        err = f"{resp.status_code} {url}: {body_preview}"
-                        agent._push_errors.append(err)
-                        agent._push_errors[:] = agent._push_errors[-5:]
-                        print(f"[LocalAgent] transcript push {err}")
+                    while True:
+                        attempts += 1
+                        try:
+                            resp = await client.post(
+                                url,
+                                json={"entries": entries},
+                                headers={
+                                    "Authorization": f"Bearer {target['token']}",
+                                    "Content-Type": "application/json",
+                                },
+                            )
+                            last_status = resp.status_code
+                            last_body = resp.text[:300] if resp.text else ""
+                            if resp.status_code < 300:
+                                if attempts > 1:
+                                    agent._push_stats["http_retried_ok"] = (
+                                        agent._push_stats.get("http_retried_ok", 0) + 1
+                                    )
+                                agent._push_stats["http_2xx"] += len(entries)
+                                return
+                            # Retry only on 404 / 5xx. 401/403/4xx-other
+                            # are auth/shape problems that won't fix
+                            # themselves with time.
+                            retryable = (
+                                resp.status_code == 404 or resp.status_code >= 500
+                            )
+                        except (httpx.RequestError, httpx.TimeoutException) as exc:
+                            last_exc = exc
+                            retryable = True
+                        if not retryable or attempts > len(backoffs):
+                            break
+                        await asyncio.sleep(backoffs[attempts - 1])
             except Exception as exc:
+                last_exc = exc
+
+            # Out of budget. Categorise the final outcome.
+            if last_exc is not None:
                 agent._push_stats["http_exc"] += len(entries)
-                err = f"exc {url}: {type(exc).__name__}: {exc}"
-                agent._push_errors.append(err)
-                agent._push_errors[:] = agent._push_errors[-5:]
-                print(f"[LocalAgent] transcript push {err}")
+                err = f"exc({attempts}x) {url}: {type(last_exc).__name__}: {last_exc}"
+            elif last_status is not None and last_status < 500:
+                agent._push_stats["http_4xx"] += len(entries)
+                err = f"{last_status}({attempts}x) {url}: {last_body}"
+            else:
+                agent._push_stats["http_5xx"] += len(entries)
+                err = f"{last_status}({attempts}x) {url}: {last_body}"
+            agent._push_errors.append(err)
+            agent._push_errors[:] = agent._push_errors[-5:]
+            print(f"[LocalAgent] transcript push {err}")
 
         try:
             asyncio.create_task(_push())
