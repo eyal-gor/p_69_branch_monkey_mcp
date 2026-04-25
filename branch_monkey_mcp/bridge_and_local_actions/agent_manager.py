@@ -668,12 +668,28 @@ class LocalAgentManager:
             await asyncio.sleep(0.1)
 
     def _post_transcript_entries(self, agent: LocalAgent, entries: list) -> None:
-        """Fire-and-forget POST of transcript entries to cerver. No-op if the
-        agent isn't bound to a cerver session (chat sessions started from the
-        Kompany frontend write transcripts via the kompany API instead).
+        """Fire-and-forget POST of transcript entries to cerver.
+
+        Signature dedup runs HERE (not just in _push_event_to_cerver) so
+        every caller benefits — including _push_user_message and the
+        post-loop final flush, which previously bypassed dedup and
+        produced duplicates on cerver. Entries with already-seen
+        signatures are silently skipped; counters reflect the skip.
         """
         if not entries:
             return
+
+        new_entries = []
+        for entry in entries:
+            sig = self._entry_signature(entry)
+            if sig in agent._pushed_signatures:
+                agent._push_stats["dedup_skipped"] += 1
+                continue
+            agent._pushed_signatures.add(sig)
+            new_entries.append(entry)
+        if not new_entries:
+            return
+        entries = new_entries
 
         async def _push():
             target = await self._resolve_cerver_target(agent)
@@ -728,21 +744,11 @@ class LocalAgentManager:
     def _push_event_to_cerver(self, agent: LocalAgent, event: Dict) -> None:
         """Push one CLI stream event to cerver as transcript entries.
 
-        Dedup is signature-based (role + kind + tool_id + sha1(content)),
-        which catches the result-vs-assistant duplication pattern that the
-        prior message.id-only dedup couldn't see.
+        Signature dedup lives in _post_transcript_entries so every push
+        path (this one, _push_user_message, the final flush) gets the
+        same protection from result-vs-assistant duplicates.
         """
-        entries = self._event_to_cerver_entries(event)
-        new_entries = []
-        for entry in entries:
-            sig = self._entry_signature(entry)
-            if sig in agent._pushed_signatures:
-                agent._push_stats["dedup_skipped"] += 1
-                continue
-            agent._pushed_signatures.add(sig)
-            new_entries.append(entry)
-        if new_entries:
-            self._post_transcript_entries(agent, new_entries)
+        self._post_transcript_entries(agent, self._event_to_cerver_entries(event))
 
     def _extract_message_id(self, event: Dict) -> Optional[str]:
         """Pull `message.id` out of a CLI stream event, unwrapping the outer

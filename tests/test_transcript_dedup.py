@@ -252,3 +252,35 @@ def test_push_event_assistant_and_result_collapse():
     assert len(agent._pushed_signatures) == 1
     # No dedup_skipped here because the result event yielded no entries to dedup.
     assert agent._push_stats["dedup_skipped"] == 0
+
+
+def test_post_transcript_dedups_across_all_callers():
+    """Regression: the v317 probe revealed dedup was only checked inside
+    _push_event_to_cerver. _push_user_message and the post-loop final
+    flush bypass that path and call _post_transcript_entries directly,
+    which produced duplicates on cerver. The fix moved dedup INTO
+    _post_transcript_entries so every push path benefits.
+    """
+    mgr = LocalAgentManager()
+    agent = _make_fake_agent()
+
+    user_entry = {"role": "user", "kind": "text", "content": "Say HELLO"}
+    assistant_entry = {"role": "assistant", "kind": "text", "content": "HELLO"}
+
+    # Caller A: simulate _push_user_message routing through
+    # _post_transcript_entries directly
+    mgr._post_transcript_entries(agent, [user_entry])
+    # Caller B: simulate streaming assistant event through the entry pipeline
+    mgr._post_transcript_entries(agent, [assistant_entry])
+    # Caller C: simulate the post-loop final flush re-pushing the same
+    # assistant text. Without the fix this would slip through and
+    # appear as a duplicate on cerver.
+    mgr._post_transcript_entries(agent, [{"role": "assistant", "kind": "text", "content": "HELLO"}])
+    # Caller D: simulate _push_user_message firing again with the same
+    # prompt — also must dedup.
+    mgr._post_transcript_entries(agent, [user_entry])
+
+    # Two unique signatures: the user message and the assistant reply.
+    assert len(agent._pushed_signatures) == 2
+    # Two duplicate attempts skipped (caller C and D).
+    assert agent._push_stats["dedup_skipped"] == 2
