@@ -80,11 +80,21 @@ class LocalAgent:
     # surfaces so we can see whether transcript pushes are healthy without
     # tailing logs.
     _push_stats: Dict[str, int] = field(default_factory=lambda: {
-        "pushed": 0,        # entries successfully sent (HTTP attempted, not necessarily 2xx)
+        "pushed": 0,        # entries the relay attempted to POST (incremented before HTTP)
+        "http_2xx": 0,      # entries acknowledged by cerver with 2xx
+        "http_4xx": 0,      # cerver rejected (auth / shape error)
+        "http_5xx": 0,      # cerver server error
+        "http_exc": 0,      # network / timeout / unhandled exception
         "dedup_skipped": 0, # entries skipped because their signature was already sent
         "transport_waits": 0,  # times we blocked waiting for the connect transport to be ready
         "drops": 0,         # entries dropped because transport never became ready (last resort)
     })
+    # Diagnostics: last few non-2xx error tails (status, body preview).
+    # Capped so a misconfigured cerver can't balloon agent memory.
+    _push_errors: List[str] = field(default_factory=list)
+    # Last URL the relay actually POSTed to. Reveals stale / wrong
+    # cerver_session_id without log scraping.
+    _last_push_url: Optional[str] = None
 
 
 class LocalAgentManager:
@@ -717,24 +727,39 @@ class LocalAgentManager:
 
             import httpx
             agent._push_stats["pushed"] += len(entries)
+            url = f"{target['url'].rstrip('/')}/v2/sessions/{target['session_id']}/transcript"
+            agent._last_push_url = url
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     resp = await client.post(
-                        f"{target['url'].rstrip('/')}/v2/sessions/{target['session_id']}/transcript",
+                        url,
                         json={"entries": entries},
                         headers={
                             "Authorization": f"Bearer {target['token']}",
                             "Content-Type": "application/json",
                         },
                     )
-                    if resp.status_code >= 400:
-                        body_preview = resp.text[:200] if resp.text else ""
-                        print(
-                            f"[LocalAgent] cerver transcript push {resp.status_code} "
-                            f"for session={target['session_id']}: {body_preview}"
-                        )
+                    body_preview = resp.text[:300] if resp.text else ""
+                    if resp.status_code < 300:
+                        agent._push_stats["http_2xx"] += len(entries)
+                    elif resp.status_code < 500:
+                        agent._push_stats["http_4xx"] += len(entries)
+                        err = f"{resp.status_code} {url}: {body_preview}"
+                        agent._push_errors.append(err)
+                        agent._push_errors[:] = agent._push_errors[-5:]
+                        print(f"[LocalAgent] transcript push {err}")
+                    else:
+                        agent._push_stats["http_5xx"] += len(entries)
+                        err = f"{resp.status_code} {url}: {body_preview}"
+                        agent._push_errors.append(err)
+                        agent._push_errors[:] = agent._push_errors[-5:]
+                        print(f"[LocalAgent] transcript push {err}")
             except Exception as exc:
-                print(f"[LocalAgent] cerver transcript push failed: {exc}")
+                agent._push_stats["http_exc"] += len(entries)
+                err = f"exc {url}: {type(exc).__name__}: {exc}"
+                agent._push_errors.append(err)
+                agent._push_errors[:] = agent._push_errors[-5:]
+                print(f"[LocalAgent] transcript push {err}")
 
         try:
             asyncio.create_task(_push())
@@ -890,6 +915,8 @@ class LocalAgentManager:
             # newly-created agents.
             "transcript_push": dict(agent._push_stats),
             "transcript_signature_count": len(agent._pushed_signatures),
+            "transcript_last_url": agent._last_push_url,
+            "transcript_recent_errors": list(agent._push_errors),
         }
 
     def list(self) -> List[dict]:
