@@ -6,6 +6,7 @@ including creation, execution, session resumption, and cleanup.
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import signal
@@ -70,11 +71,20 @@ class LocalAgent:
     # signal. Defaulting to False keeps interactive sessions alive — only
     # explicit one-shot triggers (run-agent, etc.) flip this on.
     complete_on_exit: bool = False
-    # Claude CLI streams each assistant message multiple times (incremental
-    # chunks + final). We push to cerver's transcript every event, so without
-    # this set the transcript ends up with N copies. Track msg_ids that have
-    # already been written and skip subsequent occurrences.
-    _pushed_msg_ids: set = field(default_factory=set)
+    # Dedup transcript pushes by content signature (role + kind + tool_id +
+    # sha1(content)). Replaces the older message.id-only dedup, which let
+    # `result` events through as silent duplicates of their matching
+    # `assistant` events (no msg.id on result events → bypass).
+    _pushed_signatures: set = field(default_factory=set)
+    # Push pipeline observability — counters that the /agents/:id endpoint
+    # surfaces so we can see whether transcript pushes are healthy without
+    # tailing logs.
+    _push_stats: Dict[str, int] = field(default_factory=lambda: {
+        "pushed": 0,        # entries successfully sent (HTTP attempted, not necessarily 2xx)
+        "dedup_skipped": 0, # entries skipped because their signature was already sent
+        "transport_waits": 0,  # times we blocked waiting for the connect transport to be ready
+        "drops": 0,         # entries dropped because transport never became ready (last resort)
+    })
 
 
 class LocalAgentManager:
@@ -577,14 +587,85 @@ class LocalAgentManager:
                     })
                 elif b.get("type") == "text":
                     entries.append({"role": "user", "kind": "text", "content": b.get("text", "")})
-        elif etype == "result":
-            # Claude's final summary message at end of run. Capture it as a
-            # final assistant entry so the transcript ends with the answer
-            # the agent produced, not an in-flight tool_use.
-            text = inner.get("result") or ""
-            if text:
-                entries.append({"role": "assistant", "kind": "text", "content": text})
+        # NOTE: `result` events are intentionally NOT mapped to transcript
+        # entries here. Claude CLI emits both an `assistant` event (with the
+        # text in a content block) and a `result` event (with the same text
+        # as `result.result`) — mapping both produced visible duplicates on
+        # cerver. The streaming `assistant` event already covers the text.
+        # The post-loop final flush (in the read loop) is now also redundant
+        # but harmless because the signature dedup in _push_event_to_cerver
+        # would skip it anyway.
         return entries
+
+    @staticmethod
+    def _entry_signature(entry: dict) -> str:
+        """Stable signature for transcript-entry dedup.
+
+        Composed of (role, kind, tool_id, sha1(content)). Two events that
+        produce the same logical transcript entry — e.g. a streaming
+        `assistant` event and the matching `result` event with identical
+        text — collapse to the same signature and the second one is
+        skipped, even though they share no message.id.
+        """
+        role = entry.get("role") or ""
+        kind = entry.get("kind") or ""
+        tool_id = entry.get("tool_id") or ""
+        # tool_use entries have empty content but unique tool_input — fold
+        # tool_input shape into the signature so two distinct tool_use
+        # events with the same tool_id but different inputs don't collide.
+        content = entry.get("content") or ""
+        if kind == "tool_use":
+            try:
+                content = json.dumps(entry.get("tool_input") or {}, sort_keys=True)
+            except (TypeError, ValueError):
+                content = str(entry.get("tool_input") or "")
+        digest = hashlib.sha1(content.encode("utf-8", errors="replace")).hexdigest()
+        return f"{role}|{kind}|{tool_id}|{digest}"
+
+    async def _resolve_cerver_target(
+        self,
+        agent: LocalAgent,
+        wait_for_transport: bool = True,
+        timeout_seconds: float = 3.0,
+    ) -> Optional[Dict[str, str]]:
+        """Resolve the cerver_url + token + session_id for transcript pushes.
+
+        Falls back to the active connect transport when the callback only
+        carries cerver_session_id (the cerver_compute provider path). When
+        the transport hasn't finished registering yet — typical for the
+        very first push right after agent.create() — block briefly with
+        polled retries instead of silently dropping the entry. Counts each
+        wait via _push_stats so health is observable.
+
+        Returns None if we genuinely can't resolve a target (no callback,
+        or transport never came up). The caller must handle that.
+        """
+        callback = agent.callback or {}
+        cerver_url = callback.get("cerver_url")
+        cerver_token = callback.get("cerver_api_token")
+        cerver_session_id = callback.get("cerver_session_id")
+        if not cerver_session_id:
+            return None
+        if cerver_url and cerver_token:
+            return {"url": cerver_url, "token": cerver_token, "session_id": cerver_session_id}
+
+        # Need to fall back to transport. Poll until ready or timeout.
+        deadline = asyncio.get_event_loop().time() + max(0.0, timeout_seconds)
+        first_wait = True
+        while True:
+            transport = get_active_transport()
+            if transport is not None and transport.cerver_url and transport.api_token:
+                if not first_wait:
+                    agent._push_stats["transport_waits"] += 1
+                return {
+                    "url": cerver_url or transport.cerver_url,
+                    "token": cerver_token or transport.api_token,
+                    "session_id": cerver_session_id,
+                }
+            if not wait_for_transport or asyncio.get_event_loop().time() >= deadline:
+                return None
+            first_wait = False
+            await asyncio.sleep(0.1)
 
     def _post_transcript_entries(self, agent: LocalAgent, entries: list) -> None:
         """Fire-and-forget POST of transcript entries to cerver. No-op if the
@@ -593,57 +674,48 @@ class LocalAgentManager:
         """
         if not entries:
             return
-        callback = agent.callback or {}
-        cerver_url = callback.get("cerver_url")
-        cerver_token = callback.get("cerver_api_token")
-        cerver_session_id = callback.get("cerver_session_id")
-        # Fallback: when the agent was spawned via cerver itself (provider.py),
-        # the callback only has cerver_session_id. Reuse the relay's own
-        # connect-transport credentials instead of refusing to push.
-        if cerver_session_id and not (cerver_url and cerver_token):
-            transport = get_active_transport()
-            if transport is not None:
-                cerver_url = cerver_url or transport.cerver_url
-                cerver_token = cerver_token or transport.api_token
-        if not (cerver_url and cerver_token and cerver_session_id):
-            # Diagnostic: callbacks ship in from /run-agent (cron) but were
-            # silently dropped here when any field was missing. Log once per
-            # agent so future runs surface the actual cause instead of a
-            # mysterious empty transcript on cerver.
-            if not getattr(agent, "_logged_skip", False):
-                missing = [
-                    name for name, val in (
-                        ("cerver_url", cerver_url),
-                        ("cerver_api_token", cerver_token),
-                        ("cerver_session_id", cerver_session_id),
-                    ) if not val
-                ]
-                print(
-                    f"[LocalAgent] transcript push skipped for agent={agent.id} "
-                    f"task={agent.task_title}: missing {missing}"
-                )
-                agent._logged_skip = True
-            return
 
         async def _push():
+            target = await self._resolve_cerver_target(agent)
+            if target is None:
+                # Last-resort drop. Log once per agent so future runs surface
+                # the actual cause (missing cerver fields or transport never
+                # came up) instead of a mysteriously empty transcript.
+                agent._push_stats["drops"] += len(entries)
+                if not getattr(agent, "_logged_skip", False):
+                    callback = agent.callback or {}
+                    missing = [
+                        name for name, val in (
+                            ("cerver_url", callback.get("cerver_url")),
+                            ("cerver_api_token", callback.get("cerver_api_token")),
+                            ("cerver_session_id", callback.get("cerver_session_id")),
+                            ("active_transport", get_active_transport() is not None),
+                        ) if not val
+                    ]
+                    print(
+                        f"[LocalAgent] transcript push dropped for agent={agent.id} "
+                        f"task={agent.task_title}: missing {missing}"
+                    )
+                    agent._logged_skip = True
+                return
+
             import httpx
+            agent._push_stats["pushed"] += len(entries)
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     resp = await client.post(
-                        f"{cerver_url.rstrip('/')}/v2/sessions/{cerver_session_id}/transcript",
+                        f"{target['url'].rstrip('/')}/v2/sessions/{target['session_id']}/transcript",
                         json={"entries": entries},
                         headers={
-                            "Authorization": f"Bearer {cerver_token}",
+                            "Authorization": f"Bearer {target['token']}",
                             "Content-Type": "application/json",
                         },
                     )
                     if resp.status_code >= 400:
-                        # Surface non-2xx so we don't silently lose transcripts
-                        # to auth/permission/shape errors on the cerver side.
                         body_preview = resp.text[:200] if resp.text else ""
                         print(
                             f"[LocalAgent] cerver transcript push {resp.status_code} "
-                            f"for session={cerver_session_id}: {body_preview}"
+                            f"for session={target['session_id']}: {body_preview}"
                         )
             except Exception as exc:
                 print(f"[LocalAgent] cerver transcript push failed: {exc}")
@@ -656,16 +728,21 @@ class LocalAgentManager:
     def _push_event_to_cerver(self, agent: LocalAgent, event: Dict) -> None:
         """Push one CLI stream event to cerver as transcript entries.
 
-        Deduplicates by Claude CLI's `message.id` so the same assistant
-        message emitted multiple times (streaming chunks + final) doesn't
-        produce duplicated transcript entries on cerver.
+        Dedup is signature-based (role + kind + tool_id + sha1(content)),
+        which catches the result-vs-assistant duplication pattern that the
+        prior message.id-only dedup couldn't see.
         """
-        msg_id = self._extract_message_id(event)
-        if msg_id:
-            if msg_id in agent._pushed_msg_ids:
-                return
-            agent._pushed_msg_ids.add(msg_id)
-        self._post_transcript_entries(agent, self._event_to_cerver_entries(event))
+        entries = self._event_to_cerver_entries(event)
+        new_entries = []
+        for entry in entries:
+            sig = self._entry_signature(entry)
+            if sig in agent._pushed_signatures:
+                agent._push_stats["dedup_skipped"] += 1
+                continue
+            agent._pushed_signatures.add(sig)
+            new_entries.append(entry)
+        if new_entries:
+            self._post_transcript_entries(agent, new_entries)
 
     def _extract_message_id(self, event: Dict) -> Optional[str]:
         """Pull `message.id` out of a CLI stream event, unwrapping the outer
@@ -801,7 +878,12 @@ class LocalAgentManager:
             "last_activity": agent.last_activity.isoformat(),
             "exit_code": agent.exit_code,
             "session_id": agent.session_id,
-            "can_resume": agent.session_id is not None
+            "can_resume": agent.session_id is not None,
+            # Push pipeline counters — zero values are fine, the keys are
+            # always present so callers (and tests) don't have to special-case
+            # newly-created agents.
+            "transcript_push": dict(agent._push_stats),
+            "transcript_signature_count": len(agent._pushed_signatures),
         }
 
     def list(self) -> List[dict]:
