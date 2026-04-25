@@ -18,6 +18,7 @@ from .config_routes import router as config_router
 from .advanced import router as advanced_router
 from .projects import router as projects_router
 from .cerver_provider import router as cerver_provider_router
+from .logs import router as logs_router
 
 # Create main router that includes all sub-routers
 main_router = APIRouter()
@@ -35,3 +36,4 @@ main_router.include_router(config_router, prefix="/api", tags=["config"])
 main_router.include_router(advanced_router, prefix="/api/local-claude", tags=["advanced"])
 main_router.include_router(projects_router, prefix="/api/local-claude/projects", tags=["projects"])
 main_router.include_router(cerver_provider_router, prefix="/api/cerver", tags=["cerver-provider"])
+main_router.include_router(logs_router, prefix="/api/local-claude", tags=["logs"])
