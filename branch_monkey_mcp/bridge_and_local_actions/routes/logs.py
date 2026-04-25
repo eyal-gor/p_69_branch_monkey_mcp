@@ -81,20 +81,48 @@ def _tail_file(path: Path, n: int) -> List[str]:
 def tail_logs(
     n: int = DEFAULT_LINES,
     grep: Optional[str] = None,
-    file: str = "relay",
+    file: str = "buffer",
+    stream: Optional[str] = None,
 ):
     """Return recent relay log lines.
 
     Query params:
-      n     — number of lines from the tail (default 200, max 2000)
-      grep  — optional substring filter (case-sensitive, NOT regex —
-              kept simple to avoid ReDoS surprises across the connect
-              channel)
-      file  — 'relay' | 'err' | 'nohup' (see _resolve_log_path)
+      n      — number of lines from the tail (default 200, max 2000)
+      grep   — optional substring filter (case-sensitive, NOT regex —
+               kept simple to avoid ReDoS surprises across the connect
+               channel)
+      file   — 'buffer' (in-memory ring, default — works regardless of
+               how the relay was launched), or 'relay' / 'err' / 'nohup'
+               for explicit on-disk reads
+      stream — 'stdout' | 'stderr' | None (only used when file='buffer')
     """
+    if file == "buffer":
+        try:
+            from ...log_buffer import get_lines, buffer_size, is_installed
+        except Exception as exc:
+            return {
+                "source": "buffer",
+                "error": f"log_buffer unavailable: {exc}",
+                "lines": [],
+                "total_returned": 0,
+                "filtered_by": grep,
+            }
+
+        rows = get_lines(n=n, grep=grep, stream=stream)
+        return {
+            "source": "buffer",
+            "installed": is_installed(),
+            "buffer_size": buffer_size(),
+            "lines": rows,
+            "total_returned": len(rows),
+            "filtered_by": grep,
+            "filtered_by_stream": stream,
+        }
+
     path = _resolve_log_path(file)
     if not path.exists():
         return {
+            "source": "file",
             "log_path": str(path),
             "exists": False,
             "lines": [],
@@ -107,6 +135,7 @@ def tail_logs(
         lines = [ln for ln in lines if grep in ln]
 
     return {
+        "source": "file",
         "log_path": str(path),
         "exists": True,
         "lines": lines,

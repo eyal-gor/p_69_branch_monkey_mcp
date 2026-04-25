@@ -2258,6 +2258,16 @@ def main():
     # Ensure output is not buffered (for background processes)
     sys.stdout.reconfigure(line_buffering=True)
 
+    # Tee stdout/stderr into an in-memory ring buffer so the log-tail
+    # endpoint works regardless of how the relay was started (uvx in a
+    # Terminal, launchd, nohup, etc). Operator still sees live output
+    # in the original stream — this just adds remote readability.
+    try:
+        from . import log_buffer
+        log_buffer.install()
+    except Exception as _exc:  # never block startup on diagnostics
+        print(f"[relay] log_buffer install failed (non-fatal): {_exc}")
+
     # Handle subcommands before argparse
     if len(sys.argv) > 1 and sys.argv[1] in ("install", "uninstall", "status"):
         cmd = sys.argv[1]
