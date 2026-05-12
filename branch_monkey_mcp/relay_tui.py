@@ -1,5 +1,5 @@
 """
-Terminal UI for the Kompany Relay.
+Terminal UI for the Cerver Relay.
 
 Shows a live dashboard with connection status, heartbeat, and system
 statistics. Press L to view logs, Q to quit.
@@ -63,7 +63,7 @@ class LogCapture:
 
 
 class RelayTUI:
-    """Curses-based terminal UI for the Kompany Relay."""
+    """Curses-based terminal UI for the Cerver Relay."""
 
     REFRESH_MS = 2000
 
@@ -440,7 +440,7 @@ class RelayTUI:
         if w >= LOGO_WIDTH + 6:
             self._draw_animated_logo(stdscr, y, col)
             y += LOGO_HEIGHT
-            subtitle = f"kompany relay {ver}".rstrip()
+            subtitle = f"cerver relay {ver}".rstrip()
             self._put(stdscr, y, col + LOGO_WIDTH - len(subtitle), subtitle, self._dim())
             y += 1
             self._hline(stdscr, y, col, bar_w)
@@ -448,7 +448,7 @@ class RelayTUI:
         else:
             self._put(stdscr, y, col, "cerver", self._bold() | self._green())
             self._put(stdscr, y, col + 7, "·", self._dim())
-            self._put(stdscr, y, col + 9, "kompany relay", self._dim())
+            self._put(stdscr, y, col + 9, "relay", self._dim())
             y += 1
             if ver:
                 self._put(stdscr, y, col, ver, self._dim())
