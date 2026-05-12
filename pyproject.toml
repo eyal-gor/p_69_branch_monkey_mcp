@@ -34,10 +34,11 @@ dependencies = [
 ]
 
 [project.scripts]
-# Cerver-facing binary (preferred name going forward — repo is being
-# renamed to p_69_cerver_relay). Same entry point as branch-monkey-relay,
-# kept as an alias so existing installs keep working.
+# Cerver-facing binaries. The relay registers your machine as a private
+# compute on cerver; add-provider walks you through wiring third-party
+# AI / compute provider credentials into your Infisical, with verification.
 cerver-relay = "branch_monkey_mcp.relay_client:main"
+cerver-add-provider = "branch_monkey_mcp.provider_setup:main"
 branch-monkey-relay = "branch_monkey_mcp.relay_client:main"
 
 # Kompany-facing binaries (unchanged — these still serve the
