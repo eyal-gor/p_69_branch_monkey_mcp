@@ -3,16 +3,21 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
+# Package name kept as branch-monkey-mcp for now — renaming it would
+# touch every `from branch_monkey_mcp.X import Y` in the codebase and
+# requires deciding what to do with the kompany_mcp/ sub-package.
+# Tracked as housekeeping. User-facing surface (binaries, install
+# URL, repo, TUI) already says cerver-relay.
 name = "branch-monkey-mcp"
-version = "0.3.0"
-description = "Kompany MCP Server for Claude Code - Task management and team collaboration"
+version = "0.4.0"
+description = "Cerver Relay (local-compute client) + Kompany MCP Server. Registers a machine as private compute on cerver.ai and exposes the kompany.dev MCP toolbelt to Claude Code."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 authors = [
-    { name = "Kompany Contributors" }
+    { name = "Eyal Goren" }
 ]
-keywords = ["mcp", "claude", "claude-code", "task-management", "ai"]
+keywords = ["mcp", "claude", "claude-code", "cerver", "ai-infrastructure", "ai-agents", "kompany"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -48,8 +53,10 @@ branch-monkey-proxy = "branch_monkey_mcp.dev_proxy:main"
 kompany-workflow = "branch_monkey_mcp.workflow:main"
 
 [project.urls]
-Homepage = "https://github.com/gneyal/branch-monkey-mcp"
-Documentation = "https://kompany.dev/install"
+Homepage      = "https://cerver.ai"
+Repository    = "https://github.com/eyal-gor/p_69_cerver_relay"
+Documentation = "https://cerver.ai/docs.html"
+Install       = "https://cerver.ai/install.sh"
 
 [tool.hatch.build.targets.wheel]
 packages = ["branch_monkey_mcp"]
