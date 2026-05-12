@@ -395,8 +395,13 @@ class LocalAgentManager:
             self._read_json_output(agent)
         )
 
-    async def spawn_cli_process(self, agent_id: str, message: str, image_paths: List[str] = None) -> None:
+    async def spawn_cli_process(self, agent_id: str, message: str, image_paths: List[str] = None, pre_logged: bool = False) -> None:
         """Spawn a CLI process from a quiescent agent.
+
+        `pre_logged=True` means the user message is already in cerver's
+        transcript (the gateway's /v2/sessions/:id/input wrote it before
+        forwarding to us). Skip _push_user_message in that case — otherwise
+        we duplicate the entry ~700ms after the gateway did.
 
         Called by send_input when:
           - status == "prepared" (first message of a deferred session)
@@ -427,8 +432,10 @@ class LocalAgentManager:
         print(f"[LocalAgent] Spawning CLI for prepared session {agent_id}")
 
         # Mirror the user's first message into cerver before the CLI starts
-        # producing assistant output.
-        self._push_user_message(agent, message)
+        # producing assistant output — but only if the gateway didn't
+        # already write it via recordInput (pre_logged=True case).
+        if not pre_logged:
+            self._push_user_message(agent, message)
 
         try:
             self._start_cli_process(agent, final_prompt)
@@ -974,13 +981,17 @@ class LocalAgentManager:
             for a in self._agents.values()
         ]
 
-    async def resume_session(self, agent_id: str, message: str, image_paths: List[str] = None) -> bool:
+    async def resume_session(self, agent_id: str, message: str, image_paths: List[str] = None, pre_logged: bool = False) -> bool:
         """Resume an agent session with a follow-up message.
 
         Args:
             agent_id: The agent to resume
             message: The follow-up message (may already contain image references)
             image_paths: Optional list of image file paths to include
+            pre_logged: If True, skip pushing the user message to cerver's
+                transcript — the gateway already wrote it via recordInput
+                before forwarding the input to this relay. Without this gate
+                we end up with two identical user entries ~700ms apart.
         """
         agent = self._agents.get(agent_id)
         if not agent:
@@ -1002,8 +1013,11 @@ class LocalAgentManager:
             print(f"[LocalAgent] Resuming with {len(image_paths)} images: {image_paths}")
 
         # Push the follow-up user message before the resumed agent starts
-        # streaming its response, so the cerver transcript reads in order.
-        self._push_user_message(agent, message)
+        # streaming its response, so the cerver transcript reads in order —
+        # unless the gateway already wrote it (pre_logged=True), in which
+        # case skip to avoid the double-entry bug.
+        if not pre_logged:
+            self._push_user_message(agent, message)
 
         try:
             if agent_id in self._output_tasks:

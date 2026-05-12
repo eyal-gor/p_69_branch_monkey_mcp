@@ -196,6 +196,12 @@ class InputRequest(BaseModel):
     input: str
     images: Optional[List[ImageData]] = None
     cli_tool: Optional[str] = None  # Override CLI provider before first message (prepared sessions only)
+    # When the cerver gateway forwards a /v2/sessions/:id/input call to
+    # the relay, it has ALREADY written the user message to the
+    # session's transcript (step 1 of recordInput). Setting this flag
+    # tells the relay to skip its own _push_user_message — otherwise
+    # the user message lands twice in the transcript ~700ms apart.
+    pre_logged: bool = False
 
 
 def save_images_to_temp(images: List[ImageData]) -> List[str]:
@@ -557,7 +563,7 @@ async def send_input(agent_id: str, request: InputRequest):
             agent_obj = agent_manager._agents.get(agent_id)
             if agent_obj:
                 agent_obj.cli_tool = request.cli_tool
-        await agent_manager.spawn_cli_process(agent_id, message, image_paths)
+        await agent_manager.spawn_cli_process(agent_id, message, image_paths, pre_logged=request.pre_logged)
         return {"success": True, "action": "started", "cli_tool": agent.get("cli_tool"), "images": len(image_paths)}
 
     print(
@@ -572,9 +578,9 @@ async def send_input(agent_id: str, request: InputRequest):
         # session_id — spawn a brand-new CLI process with the user's input
         # as the prompt. Either way the user's first message lands.
         if agent.get("session_id"):
-            await agent_manager.resume_session(agent_id, message, image_paths)
+            await agent_manager.resume_session(agent_id, message, image_paths, pre_logged=request.pre_logged)
             return {"success": True, "action": "resumed", "images": len(image_paths)}
-        await agent_manager.spawn_cli_process(agent_id, message, image_paths)
+        await agent_manager.spawn_cli_process(agent_id, message, image_paths, pre_logged=request.pre_logged)
         return {"success": True, "action": "started", "images": len(image_paths)}
 
     if agent["status"] == "running":
