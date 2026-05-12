@@ -34,8 +34,15 @@ dependencies = [
 ]
 
 [project.scripts]
-branch-monkey-mcp = "branch_monkey_mcp.kompany_mcp:main"
+# Cerver-facing binary (preferred name going forward — repo is being
+# renamed to p_69_cerver_relay). Same entry point as branch-monkey-relay,
+# kept as an alias so existing installs keep working.
+cerver-relay = "branch_monkey_mcp.relay_client:main"
 branch-monkey-relay = "branch_monkey_mcp.relay_client:main"
+
+# Kompany-facing binaries (unchanged — these still serve the
+# kompany.dev MCP server and workflow runner).
+branch-monkey-mcp = "branch_monkey_mcp.kompany_mcp:main"
 branch-monkey-proxy = "branch_monkey_mcp.dev_proxy:main"
 kompany-workflow = "branch_monkey_mcp.workflow:main"
 
