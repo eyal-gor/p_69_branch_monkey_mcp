@@ -891,8 +891,6 @@ class LocalAgentManager:
                 return
         if not isinstance(inner, dict) or inner.get("type") != "result":
             return
-        # Diagnostic — remove once model-extraction is confirmed working in prod.
-        print(f"[DEBUG _extract] inner.keys={list(inner.keys())[:12]} has_modelUsage={'modelUsage' in inner} has_model={inner.get('model') is not None}")
         usage = inner.get("usage")
         if not isinstance(usage, dict) or not usage:
             return
