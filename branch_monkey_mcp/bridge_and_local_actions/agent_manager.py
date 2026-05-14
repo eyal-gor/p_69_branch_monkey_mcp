@@ -493,6 +493,16 @@ class LocalAgentManager:
                 # transcript instead of just the final output.
                 self._push_event_to_cerver(agent, event)
 
+                # Extract token usage from `result` events (claude) and
+                # `turn.completed` events (codex, already normalized to
+                # type=result by CodexProvider.normalize_event). These
+                # are the only events that carry real usage counts; the
+                # data exists in the CLI stream for ~2ms today and is
+                # otherwise dropped on the floor. Persist it to cerver
+                # session metadata so /cerver compare can print actual
+                # tokens + cost instead of the chars/4 estimate.
+                self._extract_and_push_usage(agent, event)
+
             except Exception as e:
                 print(f"[LocalAgent] Read error: {e}")
                 break
@@ -839,6 +849,103 @@ class LocalAgentManager:
         else:
             print(
                 f"[LocalAgent] cli-state PATCH failed after {attempts} attempts: "
+                f"HTTP {last_status}"
+            )
+
+    def _extract_and_push_usage(self, agent: LocalAgent, event: Dict) -> None:
+        """Pull token-usage off a `result`-shaped event and PATCH it to the
+        cerver session's metadata. Both Claude Code (`type=result`) and
+        Codex (`type=turn.completed`, normalized to `type=result` by
+        CodexProvider.normalize_event) emit this once per turn. The
+        underlying field names differ — claude uses cache_creation /
+        cache_read, codex uses cached_input / reasoning_output — so we
+        keep the raw object and let the consumer interpret.
+
+        Accumulates across turns on `agent.usage_cumulative` so an
+        interactive session reports total spend, not just the last turn.
+        Fire-and-forget; the run keeps moving if cerver is slow.
+        """
+        # Unwrap process_provider_output_text's `{type:output, data:json}`
+        # envelope to get the actual stream event.
+        inner = event
+        if event.get("type") == "output" and isinstance(event.get("data"), str):
+            try:
+                inner = json.loads(event["data"])
+            except (json.JSONDecodeError, TypeError):
+                return
+        if not isinstance(inner, dict) or inner.get("type") != "result":
+            return
+        usage = inner.get("usage")
+        if not isinstance(usage, dict) or not usage:
+            return
+
+        # Accumulate input + output across turns. Vendor-specific fields
+        # (cache_*, reasoning_*) we pass through from the latest turn only;
+        # summing them cleanly would require knowing each field's semantics.
+        if not hasattr(agent, "usage_cumulative") or agent.usage_cumulative is None:
+            agent.usage_cumulative = {"input_tokens": 0, "output_tokens": 0, "turns": 0}
+        agent.usage_cumulative["input_tokens"] += int(usage.get("input_tokens") or 0)
+        agent.usage_cumulative["output_tokens"] += int(usage.get("output_tokens") or 0)
+        agent.usage_cumulative["turns"] += 1
+
+        body = {
+            "metadata": {
+                "usage_total": agent.usage_cumulative,
+                "usage_last": usage,
+                "usage_cli": agent.cli_tool,
+            }
+        }
+        asyncio.create_task(self._patch_session_metadata(agent, body))
+
+    async def _patch_session_metadata(self, agent: LocalAgent, body: Dict) -> None:
+        """Fire-and-forget PATCH to /v2/sessions/<id> with arbitrary
+        metadata merge. Shared by the usage push and any other small
+        per-turn updates that don't warrant their own endpoint. Same
+        retry budget as transcript pushes."""
+        target = await self._resolve_cerver_target(
+            agent, wait_for_transport=True, timeout_seconds=5.0
+        )
+        if target is None:
+            return
+        url = f"{target['url'].rstrip('/')}/v2/sessions/{target['session_id']}"
+        backoffs = [0.2, 0.4, 0.8, 1.5, 2.5]
+        attempts = 0
+        last_status = None
+        last_exc = None
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=5) as client:
+                while True:
+                    attempts += 1
+                    try:
+                        resp = await client.patch(
+                            url, json=body,
+                            headers={
+                                "Authorization": f"Bearer {target['token']}",
+                                "Content-Type": "application/json",
+                            },
+                        )
+                        last_status = resp.status_code
+                        if resp.status_code < 300:
+                            return
+                        retryable = resp.status_code == 404 or resp.status_code >= 500
+                    except (httpx.RequestError, httpx.TimeoutException) as exc:
+                        last_exc = exc
+                        retryable = True
+                    if not retryable or attempts > len(backoffs):
+                        break
+                    await asyncio.sleep(backoffs[attempts - 1])
+        except Exception as exc:
+            last_exc = exc
+
+        if last_exc is not None:
+            print(
+                f"[LocalAgent] metadata PATCH failed after {attempts}x: "
+                f"{type(last_exc).__name__}: {last_exc}"
+            )
+        elif last_status is not None and last_status >= 300:
+            print(
+                f"[LocalAgent] metadata PATCH failed after {attempts}x: "
                 f"HTTP {last_status}"
             )
 
