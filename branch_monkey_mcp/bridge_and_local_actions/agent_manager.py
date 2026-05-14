@@ -909,14 +909,39 @@ class LocalAgentManager:
             "usage_last": usage,
             "usage_cli": agent.cli_tool,
         }
-        # Record the actual model the CLI ran. Both claude and codex put it
-        # on the result event (claude: top-level `model`; codex: same after
-        # normalize_event). Surfacing it in metadata.cli_model lets cerver
-        # sessions / cerver show display "what actually ran" instead of
-        # forcing the user to grep transcripts. The user's requested model
-        # (from session-create metadata.cli_model) gets clobbered here on
-        # purpose — observed beats requested when they disagree.
+        # Record the actual model the CLI ran. Surfacing it in
+        # metadata.cli_model lets cerver sessions / cerver show display
+        # "what actually ran" instead of forcing the user to grep
+        # transcripts. The user's requested model (from session-create
+        # metadata.cli_model) gets clobbered here on purpose — observed
+        # beats requested when they disagree.
+        #
+        # Sources differ by CLI:
+        # - Claude Code's `result` event has no top-level `model` field;
+        #   the model is the *key* inside `modelUsage` (e.g.
+        #   "claude-haiku-4-5-20251001"). Multiple keys appear if a
+        #   sub-agent ran a different model, but the agent's own model
+        #   shows up as the largest-token entry.
+        # - Codex's result (after CodexProvider.normalize_event) has a
+        #   top-level `model` string.
+        # - Grok proxies through claude, so it follows claude's shape.
         observed_model = inner.get("model")
+        if not (isinstance(observed_model, str) and observed_model):
+            model_usage = inner.get("modelUsage")
+            if isinstance(model_usage, dict) and model_usage:
+                # Pick the entry with the most output tokens — that's the
+                # main agent. Sub-agent spawns (e.g. Task tool) show up
+                # smaller. Falls back to first key if no usage info.
+                best_key = None
+                best_out = -1
+                for k, v in model_usage.items():
+                    if not isinstance(v, dict):
+                        continue
+                    out = v.get("outputTokens") or v.get("output_tokens") or 0
+                    if out > best_out:
+                        best_out = out
+                        best_key = k
+                observed_model = best_key or next(iter(model_usage.keys()))
         if isinstance(observed_model, str) and observed_model:
             body_metadata["cli_model"] = observed_model
             body_metadata["cli_model_provider"] = _model_provider_for_cli(agent.cli_tool)
