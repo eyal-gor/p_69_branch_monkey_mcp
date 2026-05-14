@@ -556,6 +556,36 @@ class RelayTUI:
         self._put(stdscr, y, val_col, dashboard_url, self._bold())
         y += 1
 
+        # TRY — onboarding hints for the /cerver Claude Code skill. Renders
+        # only until the first request lands; after the user is up and running
+        # it auto-hides so STATUS / WORKLOAD / COMPUTE get the screen back.
+        if s.get("requests_handled", 0) == 0:
+            y += 1
+            self._put(stdscr, y, lbl_col, "TRY", self._dim())
+            self._put(
+                stdscr, y, lbl_col + 4,
+                "(in Claude Code — the /cerver skill is installed)",
+                self._dim(),
+            )
+            y += 1
+            self._hline(stdscr, y, col, bar_w)
+            y += 1
+            tips = (
+                ('/cerver run "<prompt>"',            "Send a prompt to this machine"),
+                ('/cerver compare "<prompt>"',       "Same prompt → claude + codex side-by-side"),
+                ('/cerver computes',                  "List your registered computes"),
+                ('/cerver move <session> <compute>',  "Move a live session to another machine"),
+            )
+            for cmd, desc in tips:
+                self._put(stdscr, y, lbl_col, "▸", self._dim())  # ▸
+                self._put(stdscr, y, lbl_col + 2, cmd, self._bold())
+                desc_col = lbl_col + 2 + len(cmd) + 2
+                if desc_col + len(desc) < bar_w + col:
+                    self._put(stdscr, y, desc_col, desc, self._dim())
+                y += 1
+            self._put(stdscr, y, lbl_col + 2, "more:  /cerver help", self._dim())
+            y += 1
+
         y += 1
         self._put(stdscr, y, lbl_col, "STATUS", self._dim())
         y += 1
