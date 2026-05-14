@@ -829,14 +829,18 @@ class RelayTUI:
         self._put(stdscr, footer_y, x + 4, "Quit", self._dim())
 
     def _draw_animated_logo(self, stdscr, y, col):
-        """Draw the logo with smooth shimmer animation."""
+        """Draw the logo as a rain-on-water surface. Random raindrops
+        spawn at impact points and ripple outward; spawn rate scales with
+        the count of running agents so the logo gets visibly more
+        animated when the relay is doing work."""
         h, w = stdscr.getmaxyx()
         num_levels = len(GRADIENT_COLORS)
+        running = (self.state.get("agent_counts") or {}).get("running", 0)
         for i, line in enumerate(LOGO):
             row_y = y + i
             if row_y >= h:
                 break
-            intensities = get_animated_attrs(self._anim_frame, len(line), row=i)
+            intensities = get_animated_attrs(self._anim_frame, len(line), row=i, workload=running)
             for cx, ch in enumerate(line):
                 if ch == " ":
                     continue
