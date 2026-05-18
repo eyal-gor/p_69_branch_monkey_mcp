@@ -233,6 +233,8 @@ class RelayTUI:
                     h, w = stdscr.getmaxyx()
                     if self._view == "dashboard":
                         self._draw_dashboard(stdscr, h, w)
+                    elif self._view == "installed":
+                        self._draw_installed(stdscr, h, w)
                     else:
                         self._draw_logs(stdscr, h, w)
                     stdscr.refresh()
@@ -348,6 +350,14 @@ class RelayTUI:
             else:
                 self._view = "logs"
                 self._scroll_offset = 0
+        elif key == ord("i") or key == ord("I"):
+            # Toggle the installed-tools screen. From any non-dashboard
+            # view, [I] also routes back to dashboard via the else branch
+            # so the user can't get marooned.
+            if self._view == "installed":
+                self._view = "dashboard"
+            elif self._view == "dashboard":
+                self._view = "installed"
         elif key == ord("n") or key == ord("N"):
             if self._view == "dashboard":
                 self._editing_name = True
@@ -363,7 +373,7 @@ class RelayTUI:
                 if stdscr:
                     curses.curs_set(1)
         elif key == ord("v") or key == ord("V"):
-            if self._view == "dashboard":
+            if self._view in ("dashboard", "installed"):
                 self._verbose = not self._verbose
         elif key == ord("s") or key == ord("S"):
             if self._view == "dashboard" and self._on_launchd_install:
@@ -712,6 +722,21 @@ class RelayTUI:
             if self._verbose:
                 self._put(stdscr, y, val_col, "Auto-start on login via launchd", self._dim())
                 y += 1
+
+        # cerver CLI binary (~/.cerver/bin/cerver). Labelled "cerver CLI"
+        # to disambiguate from the AI CLI row above (claude/codex/grok).
+        cli_path = os.path.expanduser("~/.cerver/bin/cerver")
+        self._put(stdscr, y, lbl_col, "cerver CLI", self._dim())
+        if os.access(cli_path, os.X_OK):
+            self._put(stdscr, y, val_col, "\u25cf", self._green() | self._bold())
+            self._put(stdscr, y, val_col + 2, "Installed")
+        else:
+            self._put(stdscr, y, val_col, "\u25cf", self._dim())
+            self._put(stdscr, y, val_col + 2, "Not installed")
+        y += 1
+        if self._verbose:
+            self._put(stdscr, y, val_col, "cerver run / compare / login (~/.cerver/bin/cerver)", self._dim())
+            y += 1
         y += 1
 
         # Workload
@@ -819,6 +844,9 @@ class RelayTUI:
         self._put(stdscr, footer_y, x, "[C]", self._cyan() | self._bold())
         self._put(stdscr, footer_y, x + 4, "CLI", self._dim())
         x += 9
+        self._put(stdscr, footer_y, x, "[I]", self._cyan() | self._bold())
+        self._put(stdscr, footer_y, x + 4, "Installed", self._dim())
+        x += 15
         self._put(stdscr, footer_y, x, "[V]", self._cyan() | self._bold())
         self._put(stdscr, footer_y, x + 4, "Verbose", self._dim())
         x += 13
@@ -1343,6 +1371,112 @@ class RelayTUI:
         if len(all_lines) > visible_h:
             pct = int((end / max(len(all_lines), 1)) * 100)
             self._put(stdscr, footer_y, col + bar_w - 6, f"{pct:3d}%", self._dim())
+
+    # ── installed-tools view ─────────────────────────────────────────
+
+    def _draw_installed(self, stdscr, h, w):
+        """Per-tool installation status for the compute this relay runs on.
+
+        Two groups:
+          1. cerver CLI — the standalone `cerver` Go binary at
+             ~/.cerver/bin/cerver. Checked directly (filesystem probe)
+             because it doesn't live in cli_providers.
+          2. AI CLIs — claude / codex / grok / etc, populated by
+             relay_client via cli_providers.get_available_providers().
+             Status includes auth (api_key / oauth / none) so the user
+             can spot "installed but not signed in" cases.
+
+        No keys to act on here — it's a read-only inspector. [I] toggles
+        back to dashboard; [Q] still quits globally.
+        """
+        col = 2
+        lbl_col = 4
+        val_col = 22
+        path_col = 42
+        bar_w = min(w - 4, 100)
+
+        # Header
+        self._put(stdscr, 1, col, "Installed on this compute", self._bold())
+        self._put(stdscr, 1, col + bar_w - 10, "[I] Back", self._cyan())
+        self._hline(stdscr, 2, col, bar_w)
+
+        y = 4
+
+        # ── cerver CLI ───────────────────────────────────────────────
+        self._put(stdscr, y, lbl_col, "CERVER", self._dim())
+        y += 1
+        self._hline(stdscr, y, col, bar_w)
+        y += 1
+
+        cli_path = os.path.expanduser("~/.cerver/bin/cerver")
+        installed = os.access(cli_path, os.X_OK)
+        self._put(stdscr, y, lbl_col, "cerver CLI", self._dim())
+        if installed:
+            self._put(stdscr, y, val_col, "●", self._green() | self._bold())
+            self._put(stdscr, y, val_col + 2, "Installed")
+            self._put(stdscr, y, path_col, cli_path, self._dim())
+        else:
+            self._put(stdscr, y, val_col, "●", self._dim())
+            self._put(stdscr, y, val_col + 2, "Not installed")
+            self._put(stdscr, y, path_col, "go install github.com/eyal-gor/p_71_cerver_cli/cmd/cerver@latest", self._dim())
+        y += 1
+        y += 1
+
+        # ── AI CLIs ──────────────────────────────────────────────────
+        self._put(stdscr, y, lbl_col, "AI CLIs", self._dim())
+        y += 1
+        self._hline(stdscr, y, col, bar_w)
+        y += 1
+
+        providers = self.state.get("cli_providers") or {}
+        if not providers:
+            self._put(stdscr, y, lbl_col, "No providers reported yet — relay still initializing.", self._dim())
+            y += 1
+        else:
+            default = self.state.get("default_cli", "")
+            for name, p in providers.items():
+                display = p.get("display_name") or name
+                is_default = (name == default)
+                label = f"{display} (default)" if is_default else display
+                self._put(stdscr, y, lbl_col, label, self._dim())
+                if p.get("installed"):
+                    self._put(stdscr, y, val_col, "●", self._green() | self._bold())
+                    # Tighter status: "Installed · signed in" or
+                    # "Installed · not signed in" so the user can act on
+                    # an auth gap without opening a separate screen.
+                    if p.get("authenticated"):
+                        method = p.get("auth_method") or ""
+                        suffix = f" · {method}" if method and method != "none" else ""
+                        detail = p.get("auth_detail") or ""
+                        self._put(stdscr, y, val_col + 2, f"Installed{suffix}")
+                        if detail and self._verbose:
+                            self._put(stdscr, y, path_col, detail[: max(0, w - path_col - 2)], self._dim())
+                        elif p.get("path"):
+                            self._put(stdscr, y, path_col, p["path"][: max(0, w - path_col - 2)], self._dim())
+                    else:
+                        self._put(stdscr, y, val_col + 2, "Installed · not signed in", self._yellow())
+                        if p.get("path"):
+                            self._put(stdscr, y, path_col, p["path"][: max(0, w - path_col - 2)], self._dim())
+                else:
+                    self._put(stdscr, y, val_col, "●", self._dim())
+                    self._put(stdscr, y, val_col + 2, "Not installed")
+                    hint = p.get("install_hint") or ""
+                    if hint:
+                        self._put(stdscr, y, path_col, hint[: max(0, w - path_col - 2)], self._dim())
+                y += 1
+
+        # Footer
+        footer_y = h - 2
+        self._hline(stdscr, footer_y - 1, col, bar_w)
+        x = lbl_col
+        self._put(stdscr, footer_y, x, "[I]", self._cyan() | self._bold())
+        self._put(stdscr, footer_y, x + 4, "Back", self._dim())
+        x += 11
+        self._put(stdscr, footer_y, x, "[V]", self._cyan() | self._bold())
+        self._put(stdscr, footer_y, x + 4, "Verbose", self._dim())
+        x += 13
+        self._put(stdscr, footer_y, x, "[Q]", self._cyan() | self._bold())
+        self._put(stdscr, footer_y, x + 4, "Quit", self._dim())
 
     # ── helpers ──────────────────────────────────────────────────────
 
