@@ -118,7 +118,11 @@ class LocalAgent:
 class LocalAgentManager:
     """Manages local Claude Code agent instances."""
 
-    MAX_AGENTS = 10  # Maximum concurrent agents to prevent resource exhaustion
+    MAX_AGENTS = 50  # Max concurrent agents; was 10. Lifted because a single
+                    # `cerver compare` with 3 CLIs uses 3 slots, so 3 parallel
+                    # compares already burned past the old cap. Real bound
+                    # should be resource-based (CPU/memory) — see suggestion
+                    # sg_b703c2a2 — but 50 is enough headroom for now.
     STALE_TIMEOUT = 3600  # Agents idle for 1 hour are considered stale
 
     def __init__(self):
@@ -667,6 +671,20 @@ class LocalAgentManager:
             self._publish_stream_to_cerver(agent, exit_event)
 
             await self._fire_callback(agent)
+
+            # Immediately remove the agent from the pool. Previously this
+            # waited for the timer-based cleanup_stale_agents pass (which
+            # only fires at the start of the next create()), so 3 parallel
+            # `cerver compare` runs (9 spawns) would pile up before any
+            # cleanup ran — and at MAX_AGENTS=10 the next create() 500'd
+            # with "Maximum number of agents (10) reached" before its own
+            # cleanup pass could free the slot. One-shot agents have no
+            # reason to linger after exit; their session_id is already
+            # nulled above.
+            self._agents.pop(agent.id, None)
+            output_task = self._output_tasks.pop(agent.id, None)
+            if output_task is not None and not output_task.done():
+                output_task.cancel()
         elif agent.session_id:
             agent.status = "paused"
             print(f"[LocalAgent] Agent {agent.id} paused, session can be resumed")
