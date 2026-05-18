@@ -240,8 +240,6 @@ class RelayTUI:
                         self._draw_connect(stdscr, h, w)
                     elif self._view == "runtime":
                         self._draw_runtime(stdscr, h, w)
-                    elif self._view == "installed":
-                        self._draw_installed(stdscr, h, w)
                     else:
                         self._draw_logs(stdscr, h, w)
                     stdscr.refresh()
@@ -359,15 +357,6 @@ class RelayTUI:
                     self._last_main_view = self._view
                 self._view = "logs"
                 self._scroll_offset = 0
-        elif key == ord("i") or key == ord("I"):
-            # Toggle the installed-tools screen. Tracks the originating
-            # main view so [I] returns the user where they came from
-            # instead of always defaulting to Connect.
-            if self._view == "installed":
-                self._view = self._last_main_view
-            elif self._view in ("connect", "runtime"):
-                self._last_main_view = self._view
-                self._view = "installed"
         elif key == ord("1"):
             # Direct nav: Connect tab. Also resets _last_main_view so
             # [I]/[L] from a sub-view return here.
@@ -394,7 +383,7 @@ class RelayTUI:
                 if stdscr:
                     curses.curs_set(1)
         elif key == ord("v") or key == ord("V"):
-            if self._view in ("connect", "runtime", "installed"):
+            if self._view in ("connect", "runtime"):
                 self._verbose = not self._verbose
         elif key == ord("s") or key == ord("S"):
             if self._view == "connect" and self._on_launchd_install:
@@ -419,6 +408,12 @@ class RelayTUI:
             self._scroll_offset += 1
         elif key == curses.KEY_DOWN and self._view == "logs":
             self._scroll_offset = max(0, self._scroll_offset - 1)
+        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT) and self._view in ("connect", "runtime"):
+            # ←/→ cycle between the two main tabs. Same effect either
+            # direction since there are only two tabs; if a third lands
+            # later we can split into prev/next.
+            self._view = "runtime" if self._view == "connect" else "connect"
+            self._last_main_view = self._view
 
     # ── drawing helpers ──────────────────────────────────────────────
 
@@ -750,20 +745,6 @@ class RelayTUI:
                 self._put(stdscr, y, val_col, "Auto-start on login via launchd", self._dim())
                 y += 1
 
-        # cerver CLI binary (~/.cerver/bin/cerver). Labelled "cerver CLI"
-        # to disambiguate from the AI CLI row above (claude/codex/grok).
-        cli_path = os.path.expanduser("~/.cerver/bin/cerver")
-        self._put(stdscr, y, lbl_col, "cerver CLI", self._dim())
-        if os.access(cli_path, os.X_OK):
-            self._put(stdscr, y, val_col, "\u25cf", self._green() | self._bold())
-            self._put(stdscr, y, val_col + 2, "Installed")
-        else:
-            self._put(stdscr, y, val_col, "\u25cf", self._dim())
-            self._put(stdscr, y, val_col + 2, "Not installed")
-        y += 1
-        if self._verbose:
-            self._put(stdscr, y, val_col, "cerver run / compare / login (~/.cerver/bin/cerver)", self._dim())
-            y += 1
 
         # Reconnects — moved from the old WORKLOAD block. Belongs to
         # Connect because it's a transport-stability metric, not a
@@ -892,6 +873,54 @@ class RelayTUI:
         y += 1
         y += 1
 
+        # Installed — inventory of tools available on this compute. The
+        # cerver CLI is probed by filesystem; AI CLIs come from
+        # cli_providers populated by relay_client. Auth state surfaces
+        # alongside install state so "installed but not signed in" is
+        # visible at a glance. Verbose mode appends path/auth detail.
+        self._put(stdscr, y, lbl_col, "INSTALLED", self._dim())
+        y += 1
+        self._hline(stdscr, y, col, bar_w)
+        y += 1
+
+        cli_path = os.path.expanduser("~/.cerver/bin/cerver")
+        self._put(stdscr, y, lbl_col, "cerver CLI", self._dim())
+        if os.access(cli_path, os.X_OK):
+            self._put(stdscr, y, val_col, "●", self._green() | self._bold())
+            self._put(stdscr, y, val_col + 2, "Installed")
+        else:
+            self._put(stdscr, y, val_col, "●", self._dim())
+            self._put(stdscr, y, val_col + 2, "Not installed")
+        y += 1
+        if self._verbose:
+            self._put(stdscr, y, val_col, cli_path, self._dim())
+            y += 1
+
+        default = s.get("default_cli", "")
+        for name, p in (s.get("cli_providers") or {}).items():
+            display = p.get("display_name") or name
+            label = f"{display} *" if name == default else display
+            self._put(stdscr, y, lbl_col, label, self._dim())
+            if p.get("installed"):
+                method = p.get("auth_method") or "none"
+                if p.get("authenticated"):
+                    suffix = f"  ·  {method}" if method != "none" else ""
+                    self._put(stdscr, y, val_col, "●", self._green() | self._bold())
+                    self._put(stdscr, y, val_col + 2, f"Installed{suffix}")
+                else:
+                    self._put(stdscr, y, val_col, "●", self._yellow() | self._bold())
+                    self._put(stdscr, y, val_col + 2, "Installed · not signed in")
+                if self._verbose:
+                    detail = p.get("auth_detail") or p.get("path") or ""
+                    if detail:
+                        y += 1
+                        self._put(stdscr, y, val_col, detail[: max(0, w - val_col - 2)], self._dim())
+            else:
+                self._put(stdscr, y, val_col, "●", self._dim())
+                self._put(stdscr, y, val_col + 2, "Not installed")
+            y += 1
+        y += 1
+
         # Recent log lines
         self._put(stdscr, y, lbl_col, "RECENT", self._dim())
         y += 1
@@ -918,23 +947,20 @@ class RelayTUI:
         self._hline(stdscr, footer_y - 1, col, bar_w)
         x = lbl_col
 
-        # Tab nav: [1] Connect, [2] Runtime — ● marks the active one.
-        active_dot = "●"
-        self._put(stdscr, footer_y, x, "[1]", self._cyan() | self._bold())
-        label = f"{active_dot} Connect" if current == "connect" else "Connect"
-        attr = self._bold() if current == "connect" else self._dim()
-        self._put(stdscr, footer_y, x + 4, label, attr)
-        x += 4 + len(label) + 2
+        # Tab nav. Active tab is bracketed and green-bold so it pops at
+        # a glance; inactive tabs are dim. ←→ also cycle between tabs
+        # (handler routes those into the matching _view assignment).
+        for key_label, view_name, display in (("[1]", "connect", "Connect"), ("[2]", "runtime", "Runtime")):
+            self._put(stdscr, footer_y, x, key_label, self._cyan() | self._bold())
+            is_active = (current == view_name)
+            label = f"[{display}]" if is_active else display
+            attr = (self._green() | self._bold()) if is_active else self._dim()
+            self._put(stdscr, footer_y, x + 4, label, attr)
+            x += 4 + len(label) + 2
 
-        self._put(stdscr, footer_y, x, "[2]", self._cyan() | self._bold())
-        label = f"{active_dot} Runtime" if current == "runtime" else "Runtime"
-        attr = self._bold() if current == "runtime" else self._dim()
-        self._put(stdscr, footer_y, x + 4, label, attr)
-        x += 4 + len(label) + 2
-
-        self._put(stdscr, footer_y, x, "[I]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 4, "Installed", self._dim())
-        x += 15
+        self._put(stdscr, footer_y, x, "←→", self._cyan() | self._bold())
+        self._put(stdscr, footer_y, x + 3, "Switch", self._dim())
+        x += 11
 
         self._put(stdscr, footer_y, x, "[L]", self._cyan() | self._bold())
         self._put(stdscr, footer_y, x + 4, "Logs", self._dim())
@@ -1483,119 +1509,6 @@ class RelayTUI:
         if len(all_lines) > visible_h:
             pct = int((end / max(len(all_lines), 1)) * 100)
             self._put(stdscr, footer_y, col + bar_w - 6, f"{pct:3d}%", self._dim())
-
-    # ── installed-tools view ─────────────────────────────────────────
-
-    def _draw_installed(self, stdscr, h, w):
-        """Per-tool installation status for the compute this relay runs on.
-
-        Two groups:
-          1. cerver CLI — the standalone `cerver` Go binary at
-             ~/.cerver/bin/cerver. Checked directly (filesystem probe)
-             because it doesn't live in cli_providers.
-          2. AI CLIs — claude / codex / grok / etc, populated by
-             relay_client via cli_providers.get_available_providers().
-             Status includes auth (api_key / oauth / none) so the user
-             can spot "installed but not signed in" cases.
-
-        No keys to act on here — it's a read-only inspector. [I] toggles
-        back to dashboard; [Q] still quits globally.
-        """
-        col = 2
-        lbl_col = 4
-        val_col = 22
-        path_col = 42
-        bar_w = min(w - 4, 100)
-
-        # Header
-        self._put(stdscr, 1, col, "Installed on this compute", self._bold())
-        self._put(stdscr, 1, col + bar_w - 10, "[I] Back", self._cyan())
-        self._hline(stdscr, 2, col, bar_w)
-
-        y = 4
-
-        # ── cerver CLI ───────────────────────────────────────────────
-        self._put(stdscr, y, lbl_col, "CERVER", self._dim())
-        y += 1
-        self._hline(stdscr, y, col, bar_w)
-        y += 1
-
-        cli_path = os.path.expanduser("~/.cerver/bin/cerver")
-        installed = os.access(cli_path, os.X_OK)
-        self._put(stdscr, y, lbl_col, "cerver CLI", self._dim())
-        if installed:
-            self._put(stdscr, y, val_col, "●", self._green() | self._bold())
-            self._put(stdscr, y, val_col + 2, "Installed")
-            self._put(stdscr, y, path_col, cli_path, self._dim())
-        else:
-            self._put(stdscr, y, val_col, "●", self._dim())
-            self._put(stdscr, y, val_col + 2, "Not installed")
-            self._put(stdscr, y, path_col, "go install github.com/eyal-gor/p_71_cerver_cli/cmd/cerver@latest", self._dim())
-        y += 1
-        y += 1
-
-        # ── AI CLIs ──────────────────────────────────────────────────
-        self._put(stdscr, y, lbl_col, "AI CLIs", self._dim())
-        y += 1
-        self._hline(stdscr, y, col, bar_w)
-        y += 1
-
-        providers = self.state.get("cli_providers") or {}
-        if not providers:
-            self._put(stdscr, y, lbl_col, "No providers reported yet — relay still initializing.", self._dim())
-            y += 1
-        else:
-            default = self.state.get("default_cli", "")
-            for name, p in providers.items():
-                display = p.get("display_name") or name
-                is_default = (name == default)
-                label = f"{display} (default)" if is_default else display
-                self._put(stdscr, y, lbl_col, label, self._dim())
-                if p.get("installed"):
-                    self._put(stdscr, y, val_col, "●", self._green() | self._bold())
-                    # Tighter status: "Installed · signed in" or
-                    # "Installed · not signed in" so the user can act on
-                    # an auth gap without opening a separate screen.
-                    if p.get("authenticated"):
-                        method = p.get("auth_method") or ""
-                        suffix = f" · {method}" if method and method != "none" else ""
-                        detail = p.get("auth_detail") or ""
-                        self._put(stdscr, y, val_col + 2, f"Installed{suffix}")
-                        if detail and self._verbose:
-                            self._put(stdscr, y, path_col, detail[: max(0, w - path_col - 2)], self._dim())
-                        elif p.get("path"):
-                            self._put(stdscr, y, path_col, p["path"][: max(0, w - path_col - 2)], self._dim())
-                    else:
-                        self._put(stdscr, y, val_col + 2, "Installed · not signed in", self._yellow())
-                        if p.get("path"):
-                            self._put(stdscr, y, path_col, p["path"][: max(0, w - path_col - 2)], self._dim())
-                else:
-                    self._put(stdscr, y, val_col, "●", self._dim())
-                    self._put(stdscr, y, val_col + 2, "Not installed")
-                    hint = p.get("install_hint") or ""
-                    if hint:
-                        self._put(stdscr, y, path_col, hint[: max(0, w - path_col - 2)], self._dim())
-                y += 1
-
-        # Footer — direct nav back to either main tab so the user
-        # doesn't have to remember which one they came from.
-        footer_y = h - 2
-        self._hline(stdscr, footer_y - 1, col, bar_w)
-        x = lbl_col
-        self._put(stdscr, footer_y, x, "[1]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 4, "Connect", self._dim())
-        x += 13
-        self._put(stdscr, footer_y, x, "[2]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 4, "Runtime", self._dim())
-        x += 13
-        self._put(stdscr, footer_y, x, "[I]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 4, "Back", self._dim())
-        x += 11
-        self._put(stdscr, footer_y, x, "[V]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 4, "Verbose", self._dim())
-        x += 13
-        self._put(stdscr, footer_y, x, "[Q]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 4, "Quit", self._dim())
 
     # ── helpers ──────────────────────────────────────────────────────
 
