@@ -7,6 +7,7 @@ statistics. Press L to view logs, Q to quit.
 
 import curses
 import os
+import shutil
 import sys
 import threading
 import time
@@ -893,6 +894,31 @@ class RelayTUI:
         y += 1
         if self._verbose:
             self._put(stdscr, y, val_col, cli_path, self._dim())
+            y += 1
+
+        # Infisical CLI — separate from "Infisical configured" which
+        # means env vars are wired up. Two distinct concerns: binary
+        # present, vs. relay can fetch secrets. A yellow ● flags the
+        # "configured but no binary" case so users still see the local
+        # CLI is missing even when the relay itself works.
+        infisical_bin = shutil.which("infisical")
+        infisical_configured = bool(
+            os.environ.get("INFISICAL_TOKEN") and os.environ.get("INFISICAL_PROJECT_ID")
+        )
+        self._put(stdscr, y, lbl_col, "Infisical CLI", self._dim())
+        if infisical_bin:
+            self._put(stdscr, y, val_col, "●", self._green() | self._bold())
+            suffix = "  ·  configured" if infisical_configured else ""
+            self._put(stdscr, y, val_col + 2, f"Installed{suffix}")
+        elif infisical_configured:
+            self._put(stdscr, y, val_col, "●", self._yellow() | self._bold())
+            self._put(stdscr, y, val_col + 2, "Configured (CLI not installed)")
+        else:
+            self._put(stdscr, y, val_col, "●", self._dim())
+            self._put(stdscr, y, val_col + 2, "Not installed")
+        y += 1
+        if self._verbose and infisical_bin:
+            self._put(stdscr, y, val_col, infisical_bin, self._dim())
             y += 1
 
         default = s.get("default_cli", "")
