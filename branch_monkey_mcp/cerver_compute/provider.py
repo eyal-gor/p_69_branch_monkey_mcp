@@ -135,6 +135,13 @@ async def create_provider_session(
         metadata.get("cerver_session_id") if isinstance(metadata, dict) else None
     )
     callback = {"cerver_session_id": cerver_session_id} if cerver_session_id else None
+    # `complete_on_exit=True` tells the agent_manager to clean up the
+    # agent record as soon as the CLI process ends, instead of parking
+    # it in `paused` for a follow-up `--resume`. One-shot callers
+    # (cerver run / cerver compare) opt in by setting the flag in
+    # session metadata — the gateway threads it through; chat sessions
+    # leave it unset so the resume path still works.
+    complete_on_exit = bool(metadata.get("complete_on_exit", False)) if isinstance(metadata, dict) else False
     created = await agent_manager.create(
         task_title=payload["title"],
         task_description=payload["description"],
@@ -147,6 +154,7 @@ async def create_provider_session(
         cli_model=payload["cli_model"],
         extra_env=extra_env,
         callback=callback,
+        complete_on_exit=complete_on_exit,
     )
 
     agent_id = created.get("id")

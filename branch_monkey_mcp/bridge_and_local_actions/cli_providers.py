@@ -590,13 +590,17 @@ class CodexProvider(CliProvider):
         out_file = tempfile.mktemp(suffix='.txt', prefix='codex-out-')
         # Discard codex's verbose stdout (it duplicates the -o file) but
         # keep stderr flowing — when codex fails (bad model, expired auth,
-        # rate limit), the only useful diagnostic lives in stderr. Letting
-        # it through means the agent_manager's exit-time diagnostic can
-        # surface the real error instead of an empty output file.
+        # rate limit), the only useful diagnostic lives in stderr.
+        #
+        # Capture codex's exit code via ${PIPESTATUS[1]} (the second pipe
+        # element) so the trailing `rm` doesn't overwrite it. Without
+        # this, a wrong-arch codex binary or auth failure exited 0 here
+        # because rm always succeeds — silently turning a hard failure
+        # into "no assistant message produced" with no diagnostic trail.
         return CliCommand(
             args=[
                 "bash", "-c",
-                f"cat '{prompt_file}' | codex exec - --dangerously-bypass-approvals-and-sandbox -o '{out_file}' > /dev/null; cat '{out_file}'; rm -f '{prompt_file}' '{out_file}'"
+                f"cat '{prompt_file}' | codex exec - --dangerously-bypass-approvals-and-sandbox -o '{out_file}' > /dev/null; code=${{PIPESTATUS[1]}}; cat '{out_file}' 2>/dev/null; rm -f '{prompt_file}' '{out_file}'; exit $code"
             ],
             env_overrides=self._build_env_overrides(),
             env_inject=self.get_auth_env(),
@@ -609,10 +613,12 @@ class CodexProvider(CliProvider):
         # putting `-c model="<name>"` ahead of `exec` is the same as
         # editing ~/.codex/config.toml's `model =` line for this call only.
         model_arg = f' -c model="{model}"' if model else ""
+        # ${PIPESTATUS[1]} preserves codex's real exit code through the
+        # trailing rm; see build_text_command above for the rationale.
         return CliCommand(
             args=[
                 "bash", "-c",
-                f"cat '{prompt_file}' | codex{model_arg} exec - --dangerously-bypass-approvals-and-sandbox --json; rm -f '{prompt_file}'"
+                f"cat '{prompt_file}' | codex{model_arg} exec - --dangerously-bypass-approvals-and-sandbox --json; code=${{PIPESTATUS[1]}}; rm -f '{prompt_file}'; exit $code"
             ],
             env_overrides=self._build_env_overrides(),
             env_inject=self.get_auth_env(),

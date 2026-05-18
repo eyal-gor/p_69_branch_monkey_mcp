@@ -1293,6 +1293,14 @@ class RelayClient:
             )
 
     async def _cerver_heartbeat_loop(self):
+        # HTTP heartbeat keeps the gateway's registration record fresh
+        # and lets us re-spin the WS transport if it's missing. It does
+        # NOT set cerver_status="connected" anymore: that's the WS
+        # transport's job (via _handle_cerver_connect_status). The old
+        # behavior here was a bug — heartbeat succeeding only tells us
+        # HTTP works, not that the connect channel is live, so a
+        # half-open WS would let the TUI keep showing green while
+        # sessions 500'd with "no active connect channel".
         while self._running:
             try:
                 await asyncio.sleep(60)
@@ -1303,17 +1311,33 @@ class RelayClient:
                 compute_id = payload.get("compute_id") or client.compute_id
                 if compute_id:
                     self._tui_update(
-                        cerver_status="connected",
                         cerver_compute_id=compute_id,
                         cerver_last_heartbeat=datetime.now(timezone.utc),
                     )
-                    if not self._cerver_connect_task or self._cerver_connect_task.done():
+                    # Restart the WS transport if its task ended OR if
+                    # we currently believe it's not connected. The latter
+                    # catches "stuck in reconnect backoff" — task is alive
+                    # but the channel is in fact down. _start_cerver_…
+                    # is idempotent when the task is healthy.
+                    task_done = not self._cerver_connect_task or self._cerver_connect_task.done()
+                    not_connected = self.state.get("cerver_status") != "connected"
+                    if task_done:
                         await self._start_cerver_connect_transport()
+                    elif not_connected:
+                        # Task is running but WS isn't connected — likely
+                        # in backoff. Leave it; transport will retry on its
+                        # own schedule. Logging surfaces the asymmetry so a
+                        # user can pattern-match the symptom.
+                        print("[Cerver] heartbeat OK but WS not connected; transport retrying")
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 print(f"[Cerver] Heartbeat failed: {e}")
-                self._tui_update(cerver_status="error")
+                # Heartbeat failure doesn't necessarily mean the channel
+                # is dead, but it's a useful signal — surface as
+                # cerver_http_error so the TUI can show "HTTP degraded"
+                # without overwriting the channel's own state.
+                self._tui_update(cerver_http_error=str(e)[:80])
 
     async def _check_for_updates_once(self) -> bool:
         """One-shot check: is the live `main` ahead of CURRENT_COMMIT_SHA?

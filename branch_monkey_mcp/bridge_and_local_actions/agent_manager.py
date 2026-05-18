@@ -84,6 +84,11 @@ class LocalAgent:
     # signal. Defaulting to False keeps interactive sessions alive — only
     # explicit one-shot triggers (run-agent, etc.) flip this on.
     complete_on_exit: bool = False
+    # Set when the stall watchdog terminates the CLI subprocess. Lets the
+    # post-loop diagnostic distinguish "CLI hung silently" from a normal
+    # non-zero exit, and surfaces a clear reason to the user instead of
+    # a bare SIGTERM exit code.
+    watchdog_killed: bool = False
     # Dedup transcript pushes by content signature (role + kind + tool_id +
     # sha1(content)). Replaces the older message.id-only dedup, which let
     # `result` events through as silent duplicates of their matching
@@ -460,10 +465,51 @@ class LocalAgentManager:
             provider = self._get_provider(agent)
             raise HTTPException(status_code=500, detail=f"Failed to start {provider.display_name}: {str(e)}")
 
+    # Seconds of silence on a running CLI's stdout before the watchdog
+    # gives up and SIGTERMs the subprocess. Tuned to be longer than a
+    # typical slow first response (claude on a busy box) but shorter
+    # than the cerver-CLI client's 180s WaitForReply ceiling — so the
+    # relay surfaces "stalled, killed" before the gateway gives up.
+    STALL_TIMEOUT_SEC = 150
+
     async def _read_json_output(self, agent: LocalAgent) -> None:
-        """Read JSON output from subprocess and broadcast to listeners."""
+        """Read JSON output from subprocess and broadcast to listeners.
+
+        A watchdog task runs alongside the read loop. If the CLI emits
+        no output for STALL_TIMEOUT_SEC seconds, the watchdog terminates
+        the subprocess — converts silent hangs (auth re-check stalls,
+        MCP server enumeration timeouts, model-side queueing pauses) into
+        a visible exit with `agent.watchdog_killed=True`, instead of
+        letting the cerver-CLI client time out at 3 minutes while the
+        relay still thinks the agent is running.
+        """
         loop = asyncio.get_event_loop()
         provider = self._get_provider(agent)
+
+        async def watchdog():
+            # Check every 15s. last_activity is bumped to now() on every
+            # output line read below, so an alive CLI never trips this.
+            try:
+                while agent.status == "running" and agent.process and agent.process.poll() is None:
+                    await asyncio.sleep(15)
+                    if agent.status != "running":
+                        return
+                    idle = (datetime.now() - agent.last_activity).total_seconds()
+                    if idle > self.STALL_TIMEOUT_SEC:
+                        print(
+                            f"[LocalAgent] watchdog: agent {agent.id} silent {int(idle)}s "
+                            f"(threshold {self.STALL_TIMEOUT_SEC}s); terminating CLI"
+                        )
+                        agent.watchdog_killed = True
+                        try:
+                            agent.process.terminate()
+                        except Exception:
+                            pass
+                        return
+            except asyncio.CancelledError:
+                pass
+
+        watchdog_task = asyncio.create_task(watchdog())
 
         def read_line():
             try:
@@ -523,6 +569,11 @@ class LocalAgentManager:
                 print(f"[LocalAgent] Read error: {e}")
                 break
 
+        # Read loop ended (EOF, exception, or watchdog terminate). Stop
+        # the watchdog before it possibly fires a second SIGTERM on an
+        # already-exiting process.
+        watchdog_task.cancel()
+
         if agent.process:
             agent.exit_code = agent.process.wait()
 
@@ -576,6 +627,10 @@ class LocalAgentManager:
                 raw_tail = "\n".join(reversed(raw_chunks))[-500:].strip()
 
                 diag_parts = [f"[cli_exit] cli={provider.name} code={agent.exit_code}"]
+                if agent.watchdog_killed:
+                    diag_parts.append(
+                        f"terminated by watchdog after {self.STALL_TIMEOUT_SEC}s of silence"
+                    )
                 if exit_failed:
                     diag_parts.append("process exited with non-zero status")
                 if not final_text:
