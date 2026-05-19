@@ -378,6 +378,14 @@ class RelayTUI:
             if self._view != "help":
                 self._view = "help"
                 self._last_main_view = "help"
+        elif key == ord("4"):
+            # Direct nav: Logs tab. Mirrors the [L] toggle's enter path,
+            # without the back-toggle behavior — [4] always lands you on
+            # logs even if you were already there.
+            if self._view != "logs":
+                self._view = "logs"
+                self._scroll_offset = 0
+            self._last_main_view = "logs"
         elif key == ord("n") or key == ord("N"):
             if self._view == "connect":
                 self._editing_name = True
@@ -418,12 +426,17 @@ class RelayTUI:
             self._scroll_offset += 1
         elif key == curses.KEY_DOWN and self._view == "logs":
             self._scroll_offset = max(0, self._scroll_offset - 1)
-        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT) and self._view in ("connect", "runtime", "help"):
-            # ←/→ cycles forward/backward through the three main tabs.
-            order = ["connect", "runtime", "help"]
+        elif key in (curses.KEY_LEFT, curses.KEY_RIGHT) and self._view in ("connect", "runtime", "help", "logs"):
+            # ←/→ cycles forward/backward through the four main tabs.
+            # Logs is now a peer tab rather than a sub-view — [L] still
+            # works as a shortcut, but arrow nav reaches it too.
+            order = ["connect", "runtime", "help", "logs"]
             i = order.index(self._view)
             step = -1 if key == curses.KEY_LEFT else 1
             self._view = order[(i + step) % len(order)]
+            # Logs has its own scroll state; tracking it as a "main view"
+            # so toggling [L] from elsewhere remembers it as the return
+            # target is fine — same semantics the other tabs already use.
             self._last_main_view = self._view
 
     # ── drawing helpers ──────────────────────────────────────────────
@@ -1059,9 +1072,9 @@ class RelayTUI:
 
         # ── TUI keybindings ─────────────────────────────────────
         if section("KEYBINDINGS"):
-            row("[1] / [2] / [3]", "Connect / Runtime / Help")
+            row("[1] / [2] / [3] / [4]", "Connect / Runtime / Help / Logs")
             row("← / →", "cycle tabs")
-            row("[L]", "logs (toggle)")
+            row("[L]", "logs (toggle, same as [4])")
             row("[V]", "verbose mode on this tab")
             row("[Q]", "quit")
             blank()
@@ -1095,7 +1108,9 @@ class RelayTUI:
         # Tab nav. Active tab is bracketed and green-bold so it pops at
         # a glance; inactive tabs are dim. ←→ also cycle between tabs
         # (handler routes those into the matching _view assignment).
-        for key_label, view_name, display in (("[1]", "connect", "Connect"), ("[2]", "runtime", "Runtime"), ("[3]", "help", "Help")):
+        # Logs is a peer tab now — [L] still works as a shortcut but
+        # arrow nav reaches it too, so it gets a slot in the strip.
+        for key_label, view_name, display in (("[1]", "connect", "Connect"), ("[2]", "runtime", "Runtime"), ("[3]", "help", "Help"), ("[4]", "logs", "Logs")):
             self._put(stdscr, footer_y, x, key_label, self._cyan() | self._bold())
             is_active = (current == view_name)
             label = f"[{display}]" if is_active else display
@@ -1106,10 +1121,6 @@ class RelayTUI:
         self._put(stdscr, footer_y, x, "←→", self._cyan() | self._bold())
         self._put(stdscr, footer_y, x + 3, "Switch", self._dim())
         x += 11
-
-        self._put(stdscr, footer_y, x, "[L]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 4, "Logs", self._dim())
-        x += 10
 
         self._put(stdscr, footer_y, x, "[V]", self._cyan() | self._bold())
         self._put(stdscr, footer_y, x + 4, "Verbose", self._dim())
@@ -1637,23 +1648,13 @@ class RelayTUI:
                 attr = self._green()
             self._put(stdscr, y, col, line[: w - 4], attr)
 
-        # Footer
-        footer_y = h - 2
-        self._hline(stdscr, footer_y - 1, col, bar_w)
-        x = col + 2
-        self._put(stdscr, footer_y, x, "[L]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 4, "Back", self._dim())
-        x += 12
-        self._put(stdscr, footer_y, x, "[\u2191\u2193]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 5, "Scroll", self._dim())
-        x += 14
-        self._put(stdscr, footer_y, x, "[Q]", self._cyan() | self._bold())
-        self._put(stdscr, footer_y, x + 4, "Quit", self._dim())
-
-        # Scroll indicator
+        # Shared tab footer (Logs highlighted as the active tab). Scroll
+        # percent goes in the top-right of the panel since the footer
+        # strip is now reserved for tab nav across all four views.
         if len(all_lines) > visible_h:
             pct = int((end / max(len(all_lines), 1)) * 100)
-            self._put(stdscr, footer_y, col + bar_w - 6, f"{pct:3d}%", self._dim())
+            self._put(stdscr, 1, col + bar_w - 8, f"  {pct:3d}%", self._dim())
+        self._draw_tab_footer(stdscr, h, w, col, lbl_col=col + 2, bar_w=bar_w, current="logs")
 
     # ── helpers ──────────────────────────────────────────────────────
 
