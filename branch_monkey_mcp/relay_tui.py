@@ -522,11 +522,19 @@ class RelayTUI:
             return fields[self._field_cursor]
         return None
 
+    def _focus_attr(self, base_attr=0):
+        """Return the attr to use for a row's text when focused.
+        Reverse-video on top of whatever base styling the row uses, so
+        the active row reads as 'inverse highlighted' across the label
+        + value — no separate cursor glyph needed."""
+        return base_attr | curses.A_REVERSE
+
     def _draw_focus_marker(self, stdscr, y, col, is_focused):
-        """Draw a ▶ glyph in the gutter when a row is focused. Falls
-        back gracefully on narrow widths."""
-        if is_focused:
-            self._put(stdscr, y, col, "▶", self._cyan() | self._bold())
+        """No-op stub kept so old call sites still work after the
+        focus-mark switched from a ▶ glyph to inverse-video text. All
+        rendering of the focus state now happens via _focus_attr() on
+        the row's label/value attrs."""
+        return
 
     # ── drawing helpers ──────────────────────────────────────────────
 
@@ -638,11 +646,12 @@ class RelayTUI:
             self._put(stdscr, y, val_col, s["user_email"], self._bold())
             y += 1
 
-        # Machine info — editable field. ▶ marker indicates the row is
-        # focused for the Up/Down/Enter nav; old letter shortcuts ([N])
+        # Machine info — editable field. Inverse-video on label+value
+        # when focused (selected by Up/Down). Old letter shortcuts ([N])
         # still work but no longer clutter the row.
-        self._draw_focus_marker(stdscr, y, col, self._focused_field_key() == "name")
-        self._put(stdscr, y, lbl_col, "Machine", self._dim())
+        focused_name = self._focused_field_key() == "name"
+        rev_name = curses.A_REVERSE if focused_name else 0
+        self._put(stdscr, y, lbl_col, "Machine", self._dim() | rev_name)
         if self._editing_name:
             field_w = max(30, bar_w - val_col + col)
             display = self._name_input[:field_w]
@@ -654,13 +663,13 @@ class RelayTUI:
                 pass
         else:
             machine_val = s.get("machine_name", "\u2014")
-            attr = self._bold() | (self._cyan() if self._focused_field_key() == "name" else 0)
-            self._put(stdscr, y, val_col, machine_val, attr)
+            self._put(stdscr, y, val_col, machine_val, self._bold() | rev_name)
         y += 1
 
         # Home — editable field
-        self._draw_focus_marker(stdscr, y, col, self._focused_field_key() == "home")
-        self._put(stdscr, y, lbl_col, "Home", self._dim())
+        focused_home = self._focused_field_key() == "home"
+        rev_home = curses.A_REVERSE if focused_home else 0
+        self._put(stdscr, y, lbl_col, "Home", self._dim() | rev_home)
         if self._editing_home:
             # Show input field with cursor
             field_w = max(30, bar_w - val_col + col)
@@ -679,8 +688,7 @@ class RelayTUI:
             y += 2
         else:
             home_val = s.get("home_dir", "\u2014")
-            attr = self._bold() | (self._cyan() if self._focused_field_key() == "home" else 0)
-            self._put(stdscr, y, val_col, home_val, attr)
+            self._put(stdscr, y, val_col, home_val, self._bold() | rev_home)
             y += 1
 
         if s.get("project"):
@@ -694,10 +702,10 @@ class RelayTUI:
         default_provider = providers.get(default_cli, {})
         cli_display = default_provider.get("display_name", default_cli.title())
         cli_authed = default_provider.get("authenticated", False)
-        self._draw_focus_marker(stdscr, y, col, self._focused_field_key() == "cli")
-        self._put(stdscr, y, lbl_col, "AI CLI", self._dim())
-        cli_attr = self._bold() | (self._cyan() if self._focused_field_key() == "cli" else 0)
-        self._put(stdscr, y, val_col, cli_display, cli_attr)
+        focused_cli = self._focused_field_key() == "cli"
+        rev_cli = curses.A_REVERSE if focused_cli else 0
+        self._put(stdscr, y, lbl_col, "AI CLI", self._dim() | rev_cli)
+        self._put(stdscr, y, val_col, cli_display, self._bold() | rev_cli)
         # Auth status dot
         dot_x = val_col + len(cli_display) + 1
         if cli_authed:
@@ -850,20 +858,21 @@ class RelayTUI:
         # Startup (launchd)
         ld = s.get("launchd")
         if ld is not None:
-            self._draw_focus_marker(stdscr, y, col, self._focused_field_key() == "launchd")
-            self._put(stdscr, y, lbl_col, "Startup", self._dim())
+            focused_ld = self._focused_field_key() == "launchd"
+            rev_ld = curses.A_REVERSE if focused_ld else 0
+            self._put(stdscr, y, lbl_col, "Startup", self._dim() | rev_ld)
             if ld == "running":
-                self._put(stdscr, y, val_col, "\u25cf", self._green() | self._bold())
-                self._put(stdscr, y, val_col + 2, "Enabled")
+                self._put(stdscr, y, val_col, "\u25cf", self._green() | self._bold() | rev_ld)
+                self._put(stdscr, y, val_col + 2, "Enabled", rev_ld)
             elif ld == "installed":
-                self._put(stdscr, y, val_col, "\u25cf", self._yellow() | self._bold())
-                self._put(stdscr, y, val_col + 2, "Installed (not running)")
+                self._put(stdscr, y, val_col, "\u25cf", self._yellow() | self._bold() | rev_ld)
+                self._put(stdscr, y, val_col + 2, "Installed (not running)", rev_ld)
             elif ld == "error":
-                self._put(stdscr, y, val_col, "\u25cf", self._red() | self._bold())
-                self._put(stdscr, y, val_col + 2, "Error")
+                self._put(stdscr, y, val_col, "\u25cf", self._red() | self._bold() | rev_ld)
+                self._put(stdscr, y, val_col + 2, "Error", rev_ld)
             else:
-                self._put(stdscr, y, val_col, "\u25cf", self._dim())
-                self._put(stdscr, y, val_col + 2, "Not installed")
+                self._put(stdscr, y, val_col, "\u25cf", self._dim() | rev_ld)
+                self._put(stdscr, y, val_col + 2, "Not installed", rev_ld)
             y += 1
             if self._verbose:
                 self._put(stdscr, y, val_col, "Auto-start on login via launchd", self._dim())
@@ -878,15 +887,14 @@ class RelayTUI:
         self._put(stdscr, y, val_col, str(rc), self._green() if rc == 0 else self._yellow())
         y += 1
 
-        # Logout — action row, no live data. Rendered as a focusable
-        # entry so the Up/Down/Enter nav has a place to land on the
-        # "logout" cursor slot (formerly the [D] keystroke). The legacy
-        # [D] still works.
+        # Logout — action row, no live data. Inverse-highlighted when
+        # focused by Up/Down for the same affordance as the editable
+        # rows. Legacy [D] keystroke still works.
         y += 1
-        self._draw_focus_marker(stdscr, y, col, self._focused_field_key() == "logout")
-        logout_attr = self._dim() | (self._cyan() if self._focused_field_key() == "logout" else 0)
-        self._put(stdscr, y, lbl_col, "Logout", logout_attr)
-        self._put(stdscr, y, val_col, "Sign out of this machine", self._dim())
+        focused_logout = self._focused_field_key() == "logout"
+        rev_logout = curses.A_REVERSE if focused_logout else 0
+        self._put(stdscr, y, lbl_col, "Logout", self._dim() | rev_logout)
+        self._put(stdscr, y, val_col, "Sign out of this machine", self._dim() | rev_logout)
         y += 1
 
         # Footer — tab nav first, then connect-specific actions.
