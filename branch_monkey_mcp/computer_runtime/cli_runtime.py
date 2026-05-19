@@ -25,6 +25,32 @@ def resolve_cli_provider(cli_tool: str) -> CliProvider:
 from . import agent_environment
 
 
+# Env vars that point Node / npm / version-managers at a specific
+# install directory. When stale (an old NVM_DIR for a node version
+# that's since been removed, an NPM_CONFIG_PREFIX pointing to a path
+# that no longer exists), Node's module resolution silently picks
+# them up and tries to load packages from the dead path — producing
+# the opaque ENOENT-against-a-ghost-nvm-path error that ate hours
+# of debugging time. We're better off forcing Node back to defaults
+# (resolve from __dirname and PATH) than honoring a stale pointer.
+_NODE_REDIRECT_VARS = (
+    "NODE_PATH",
+    "NODE_OPTIONS",       # could carry --preserve-symlinks etc.
+    "NPM_CONFIG_PREFIX",
+    "npm_config_prefix",
+    "NPM_PREFIX",
+    "NVM_DIR",
+    "NVM_BIN",
+    "NVM_INC",
+    "NVM_CD_FLAGS",
+    "PNPM_HOME",
+    "VOLTA_HOME",
+    "FNM_DIR",
+    "FNM_MULTISHELL_PATH",
+    "ASDF_DATA_DIR",      # only for the agent; doesn't disable asdf for the user
+)
+
+
 def build_process_env(cli_cmd, extra_env: Optional[dict] = None) -> dict:
     """Build the environment for a CLI command.
 
@@ -49,6 +75,15 @@ def build_process_env(cli_cmd, extra_env: Optional[dict] = None) -> dict:
     # Always remove CLAUDECODE to allow nested launches.
     env.pop("CLAUDECODE", None)
 
+    # Scrub stale Node / version-manager pointers BEFORE Infisical
+    # layers on — otherwise a key in the vault literally named
+    # `NPM_CONFIG_PREFIX` would re-poison the agent's resolution.
+    # The agent_environment probe already handed us the right PATH;
+    # let Node walk that for binaries and resolve modules from the
+    # script's __dirname like it would in the user's shell.
+    for var in _NODE_REDIRECT_VARS:
+        env.pop(var, None)
+
     # Use the PATH that the agent_environment probe stitched together
     # at relay startup — host PATH + login-shell PATH + well-known
     # macOS/Linux install dirs. That probe knows where THIS machine's
@@ -66,6 +101,14 @@ def build_process_env(cli_cmd, extra_env: Optional[dict] = None) -> dict:
         infisical_env = get_secrets_sync()
         if infisical_env:
             env.update(infisical_env)
+
+    # Second scrub pass — Infisical may carry these as named secrets
+    # (one user had a stale `NPM_CONFIG_PREFIX=~/.nvm/versions/node/v20.19.0`
+    # in their vault that survived the node uninstall). The env_inject /
+    # extra_env layers below can still set them deliberately if a caller
+    # really needs to point Node somewhere specific.
+    for var in _NODE_REDIRECT_VARS:
+        env.pop(var, None)
 
     if cli_cmd.env_inject:
         env.update(cli_cmd.env_inject)
