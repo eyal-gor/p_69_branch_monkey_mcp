@@ -1240,6 +1240,36 @@ class RelayTUI:
             self._put(stdscr, y, val_col, infisical_bin, self._dim())
             y += 1
 
+        # Go — required by `cerver update` (which shells out to
+        # `go install …@latest`). Surfaces install state so a failed
+        # Update CLI action has obvious context. Probe the same well-
+        # known toolchain dirs the CLI's findGo() walks, since the
+        # relay process's PATH may not have /opt/homebrew/bin etc.
+        go_bin = shutil.which("go")
+        if not go_bin:
+            for cand in (
+                "/opt/homebrew/bin/go",
+                "/usr/local/bin/go",
+                "/usr/local/go/bin/go",
+                os.path.expanduser("~/go/bin/go"),
+                os.path.expanduser("~/.asdf/shims/go"),
+                os.path.expanduser("~/.local/bin/go"),
+            ):
+                if os.path.exists(cand) and os.access(cand, os.X_OK):
+                    go_bin = cand
+                    break
+        self._put(stdscr, y, lbl_col, "Go", self._dim())
+        if go_bin:
+            self._put(stdscr, y, val_col, "●", self._green() | self._bold())
+            self._put(stdscr, y, val_col + 2, "Installed")
+        else:
+            self._put(stdscr, y, val_col, "●", self._yellow() | self._bold())
+            self._put(stdscr, y, val_col + 2, "Not installed (needed for Update CLI)")
+        y += 1
+        if self._verbose and go_bin:
+            self._put(stdscr, y, val_col, go_bin, self._dim())
+            y += 1
+
         default = s.get("default_cli", "")
         for name, p in (s.get("cli_providers") or {}).items():
             display = p.get("display_name") or name
