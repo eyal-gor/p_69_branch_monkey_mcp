@@ -1634,7 +1634,24 @@ class RelayClient:
             except asyncio.CancelledError:
                 break
             except Exception:
-                # Local server down — still collect basic compute stats
+                # Local server down — still collect basic compute stats AND
+                # read agent counts directly from the in-process manager so
+                # the Runtime tab keeps showing live load even when the HTTP
+                # local server failed to start (port-binding takeover lost,
+                # supervisor restart in progress, etc.). Before this fallback
+                # the Agents row showed "0 run 0 paused 0 ready" any time
+                # the stats endpoint was unreachable — completely misleading
+                # when the manager was actively handling sessions.
+                fallback_counts: Dict[str, int] = {}
+                try:
+                    from .bridge_and_local_actions.agent_manager import agent_manager as _mgr
+                    for a in _mgr.list():
+                        status = a.get("status") if isinstance(a, dict) else None
+                        if not status:
+                            continue
+                        fallback_counts[status] = fallback_counts.get(status, 0) + 1
+                except Exception:
+                    pass
                 try:
                     import shutil, os as _os
                     cpu_count = _os.cpu_count() or 1
@@ -1646,9 +1663,13 @@ class RelayClient:
                         "load": {"one": round(load1, 2), "normalized_percent": round((load1 / cpu_count) * 100, 1)},
                         "disk": {"percent": round((disk.used / disk.total) * 100, 1), "free_bytes": disk.free, "total_bytes": disk.total},
                     }
-                    self._tui_update(server_running=False, compute=fallback_compute)
+                    self._tui_update(
+                        server_running=False,
+                        compute=fallback_compute,
+                        agent_counts=fallback_counts,
+                    )
                 except Exception:
-                    self._tui_update(server_running=False)
+                    self._tui_update(server_running=False, agent_counts=fallback_counts)
 
     async def _unregister_machine(self):
         """Mark compute node as offline."""

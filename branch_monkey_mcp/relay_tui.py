@@ -1463,14 +1463,38 @@ class RelayTUI:
         y += 1
 
         agent_counts = s.get("agent_counts", {})
-        self._put(stdscr, y, lbl_col, "Agents", self._dim())
+        running = int(agent_counts.get("running", 0) or 0)
+        paused = int(agent_counts.get("paused", 0) or 0)
+        prepared = int(agent_counts.get("prepared", 0) or 0)
+        total_live = running + paused + prepared
+        self._put(stdscr, y, lbl_col, "Live agents", self._dim())
+        # Lead with the running count in bold so the actual live load is
+        # one glance — "how many CLIs are this machine driving right now?"
+        # — instead of buried in a three-up split where everyone reads
+        # the first number ("0 run") and concludes nothing's happening.
+        running_attr = self._bold() | (self._green() if running > 0 else 0)
+        self._put(stdscr, y, val_col, f"{running}", running_attr)
         self._put(
             stdscr,
             y,
-            val_col,
-            f"{agent_counts.get('running', 0)} run  {agent_counts.get('paused', 0)} paused  {agent_counts.get('prepared', 0)} ready",
+            val_col + max(2, len(str(running)) + 1),
+            f"running  ·  {paused} paused  ·  {prepared} ready  ·  {total_live} total",
+            self._dim(),
         )
         y += 1
+        # When the local HTTP server is down, the stats come from the
+        # in-process manager fallback — say so, so a stale "0 running"
+        # number can't be mistaken for ground truth.
+        if not s.get("server_running"):
+            self._put(stdscr, y, lbl_col, "", self._dim())
+            self._put(
+                stdscr,
+                y,
+                val_col,
+                "(local HTTP down — counts read directly from agent manager)",
+                self._dim(),
+            )
+            y += 1
 
         workflow_counts = (s.get("workflow_summary") or {}).get("counts", {})
         self._put(stdscr, y, lbl_col, "Workflows", self._dim())
