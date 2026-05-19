@@ -569,7 +569,16 @@ class RelayTUI:
         """Worker: locates the cerver binary (preferring the same path
         the user actually invokes), runs `cerver update`, and reports
         outcome via self.state so the Provision row updates on the next
-        draw tick."""
+        draw tick.
+
+        Extends PATH to include common toolchain directories before
+        spawning — the relay process is often started from launchd or
+        a curl|bash installer with a minimal PATH, missing the dirs
+        where Homebrew, asdf, or `g` install `go`. `cerver update`
+        shells out to `go install`, so a missing `go` on the subprocess
+        PATH is the #1 reason this verb fails from the TUI even when
+        it works in the user's interactive shell.
+        """
         import subprocess
         try:
             cerver_bin = os.path.expanduser("~/.cerver/bin/cerver")
@@ -581,12 +590,31 @@ class RelayTUI:
                     self.state["cerver_update_state"] = "failed"
                     self.state["cerver_update_last_msg"] = "cerver binary not found on PATH"
                     return
-            print(f"[update] running {cerver_bin} update")
+            # Build an enriched PATH for the subprocess. Order: existing
+            # PATH first (so user customizations win), then common dirs
+            # where go/node/npm tend to live. Dedupe to keep it short.
+            base_path = os.environ.get("PATH", "")
+            extra_dirs = [
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/usr/local/go/bin",
+                os.path.expanduser("~/go/bin"),
+                os.path.expanduser("~/.asdf/shims"),
+                os.path.expanduser("~/.local/bin"),
+            ]
+            existing = set(base_path.split(":"))
+            for d in extra_dirs:
+                if d and d not in existing and os.path.isdir(d):
+                    base_path = (base_path + ":" + d) if base_path else d
+                    existing.add(d)
+            env = {**os.environ, "PATH": base_path}
+            print(f"[update] running {cerver_bin} update (PATH augmented)")
             proc = subprocess.run(
                 [cerver_bin, "update"],
                 capture_output=True,
                 text=True,
                 timeout=180,
+                env=env,
             )
             # Echo captured output into the relay log stream so the
             # Logs tab shows the full transcript.
