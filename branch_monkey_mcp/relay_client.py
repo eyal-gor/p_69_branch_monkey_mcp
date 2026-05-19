@@ -1942,12 +1942,15 @@ def start_server_in_background(port: int = 18081, home_dir: Optional[str] = None
     """Start the local agent server in a background thread.
 
     If the port is held by another relay process (stale instance,
-    crashed launchd job, leftover from a prior session), reclaim the
-    port automatically — silently running in zombie mode (the old
-    behavior) hid bugs for hours during real incident response.
+    crashed launchd job, leftover from a prior session), reclaim it
+    automatically — silently running in zombie mode (the old behavior)
+    hid bugs for hours during real incident response.
 
-    If the port is held by something we don't recognize as a relay,
-    refuse to start and surface the holder so the user can decide.
+    If the holder can't be identified (transient socket state, lsof
+    missing, foreign process), fall back to the legacy behavior:
+    print what we found and skip the local server. Exiting hard here
+    would leave the gateway-connected half of the relay dead too,
+    which is worse than running degraded.
     """
     import threading
 
@@ -1955,14 +1958,14 @@ def start_server_in_background(port: int = 18081, home_dir: Optional[str] = None
         holder = _port_holder_info(port)
         if holder and _looks_like_relay(holder["command"]):
             if not _try_take_over_port(port, holder):
-                print(f"[Relay] Could not reclaim port {port} from pid {holder['pid']}. Exiting.")
-                print(f"[Relay] Run manually: lsof -ti:{port} | xargs kill -9")
-                sys.exit(2)
+                print(f"[Relay] Could not reclaim port {port} from pid {holder['pid']} — skipping local server.")
+                print(f"[Relay] Run manually if needed: lsof -ti:{port} | xargs kill -9")
+                return None
         else:
-            who = f"pid {holder['pid']} ({holder['command']})" if holder else "unknown process"
-            print(f"[Relay] Port {port} is held by {who} — refusing to start.")
-            print(f"[Relay] If it's safe to kill: lsof -ti:{port} | xargs kill -9")
-            sys.exit(2)
+            who = f"pid {holder['pid']} ({holder['command']})" if holder else "unknown holder (no lsof match)"
+            print(f"[Relay] Port {port} is in use ({who}) — skipping local server.")
+            print(f"[Relay] Gateway transport will still run. To reclaim: lsof -ti:{port} | xargs kill -9")
+            return None
 
     def run():
         from .bridge_and_local_actions import run_server, set_default_working_dir, set_home_directory
