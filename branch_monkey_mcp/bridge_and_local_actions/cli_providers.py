@@ -5,6 +5,7 @@ Supports Claude Code CLI and OpenAI Codex CLI with a unified interface
 for command building, output normalization, and availability checking.
 """
 
+import glob
 import json
 import os
 import shutil
@@ -13,6 +14,104 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
+
+
+# Cache the augmented PATH once per process — globbing nvm/fnm/asdf
+# version dirs hits the filesystem and a relay can call _resolve_cli
+# several times per second during compute polling.
+_resolver_path_cache: Optional[str] = None
+
+
+def _build_resolver_path() -> str:
+    """Build an augmented PATH for binary lookup without mutating the
+    process environment. Used by `_resolve_cli` below.
+
+    Why this isn't `os.environ["PATH"] = …` at import time:
+    that mutation leaks into every subprocess the relay spawns,
+    including the agent child processes themselves — making PATH
+    order load-bearing on import order, and silently changing what
+    a user-spawned tool sees. Keep the augmentation local to *lookup*.
+
+    Why we glob version-manager dirs:
+    `~/.nvm/versions/node` is a parent of `vNN.N.N/bin` subdirs;
+    `shutil.which` won't recurse, so adding the parent does nothing.
+    Same for fnm and asdf. We resolve the actual `<version>/bin`
+    paths once and append them.
+    """
+    static_dirs = [
+        "/opt/homebrew/bin",            # Homebrew on Apple Silicon
+        "/opt/homebrew/sbin",
+        "/usr/local/bin",               # Homebrew on Intel + generic
+        "/usr/local/sbin",
+        "/opt/homebrew/opt/node/bin",
+        os.path.expanduser("~/.local/bin"),
+        os.path.expanduser("~/.npm-global/bin"),
+        os.path.expanduser("~/.asdf/shims"),
+        os.path.expanduser("~/.volta/bin"),
+        os.path.expanduser("~/.bun/bin"),
+        os.path.expanduser("~/.cargo/bin"),
+    ]
+    pnpm_home = os.environ.get("PNPM_HOME")
+    if pnpm_home:
+        static_dirs.append(pnpm_home)
+
+    # nvm, fnm, asdf: each <version>/bin needs to be a leaf PATH entry.
+    glob_patterns = [
+        os.path.expanduser("~/.nvm/versions/node/*/bin"),
+        os.path.expanduser("~/.fnm/node-versions/*/installation/bin"),
+        os.path.expanduser("~/Library/Application Support/fnm/node-versions/*/installation/bin"),
+        os.path.expanduser("~/.asdf/installs/nodejs/*/bin"),
+    ]
+    versioned_dirs: List[str] = []
+    for pat in glob_patterns:
+        try:
+            versioned_dirs.extend(sorted(glob.glob(pat)))
+        except OSError:
+            # Permission errors / odd filesystems — silently skip.
+            pass
+
+    current = (os.environ.get("PATH", "") or "").split(os.pathsep)
+    seen = set(current)
+    extras: List[str] = []
+    for p in static_dirs + versioned_dirs:
+        if not p or p in seen:
+            continue
+        try:
+            if os.path.isdir(p):
+                extras.append(p)
+                seen.add(p)
+        except OSError:
+            pass
+    return os.pathsep.join(current + extras) if extras else (os.environ.get("PATH", "") or "")
+
+
+def _resolve_cli(name: str) -> Optional[str]:
+    """`shutil.which` with our augmented PATH. Returns None if missing.
+
+    Per-call resolver — the augmented PATH lives in a module cache,
+    not in `os.environ`, so we don't accidentally hand a modified
+    environment to subprocesses. Subprocesses that need to find these
+    binaries themselves should compose their own PATH (see, e.g.,
+    relay_tui's update-CLI subprocess augmentation).
+    """
+    global _resolver_path_cache
+    # Standard PATH lookup first — covers the common case where the
+    # user's interactive shell has launched us and PATH is rich.
+    found = shutil.which(name)
+    if found:
+        return found
+    if _resolver_path_cache is None:
+        _resolver_path_cache = _build_resolver_path()
+    return shutil.which(name, path=_resolver_path_cache)
+
+
+def _invalidate_resolver_path_cache() -> None:
+    """Drop the cached augmented PATH. Call after install/upgrade flows
+    that add a new binary so `is_available()` re-discovers it on the
+    next probe without a relay restart.
+    """
+    global _resolver_path_cache
+    _resolver_path_cache = None
 
 
 @dataclass
@@ -201,7 +300,7 @@ class ClaudeCodeProvider(CliProvider):
     api_key_config = "anthropic_api_key"
 
     def is_available(self) -> Optional[str]:
-        return shutil.which("claude")
+        return _resolve_cli("claude")
 
     def get_auth_status(self) -> dict:
         """Check Claude Code auth: try `claude auth status` (JSON output)."""
@@ -377,7 +476,7 @@ class CodexProvider(CliProvider):
     _subscription_cache: Optional[bool] = None
 
     def is_available(self) -> Optional[str]:
-        return shutil.which("codex")
+        return _resolve_cli("codex")
 
     def _has_subscription(self) -> bool:
         """True iff `codex login status` reports a signed-in OAuth session.
@@ -814,7 +913,7 @@ class GrokProvider(CliProvider):
     api_key_config = "xai_api_key"
 
     def is_available(self) -> Optional[str]:
-        return shutil.which("grok")
+        return _resolve_cli("grok")
 
     def get_auth_status(self) -> dict:
         """Check Grok auth: stored API key or XAI_API_KEY env var."""
