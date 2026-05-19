@@ -431,20 +431,20 @@ class RelayTUI:
             self._scroll_offset += 1
         elif key == curses.KEY_DOWN and self._view == "logs":
             self._scroll_offset = max(0, self._scroll_offset - 1)
-        elif key == curses.KEY_UP and self._view in ("connect", "runtime"):
+        elif key == curses.KEY_UP and self._view in ("connect", "provision", "runtime"):
             fields = self._active_field_keys()
             if fields:
                 self._field_cursor = (self._field_cursor - 1) % len(fields)
-        elif key == curses.KEY_DOWN and self._view in ("connect", "runtime"):
+        elif key == curses.KEY_DOWN and self._view in ("connect", "provision", "runtime"):
             fields = self._active_field_keys()
             if fields:
                 self._field_cursor = (self._field_cursor + 1) % len(fields)
-        elif key in (curses.KEY_ENTER, 10, 13) and self._view in ("connect", "runtime"):
+        elif key in (curses.KEY_ENTER, 10, 13) and self._view in ("connect", "provision", "runtime"):
             # Enter on the focused field dispatches to its action handler
             # — same path as the legacy letter shortcuts ([N]/[H]/[S]/[C]/[D]),
-            # which we keep around for muscle-memory back-compat. Both
-            # Connect (name/launchd/logout) and Runtime (home/cli) flow
-            # through the same handler dispatch table.
+            # which we keep around for muscle-memory back-compat. Connect
+            # (name/launchd/logout), Provision (update_cli), and Runtime
+            # (home/cli) flow through the same handler dispatch table.
             fields = self._active_field_keys()
             if 0 <= self._field_cursor < len(fields):
                 key_name = fields[self._field_cursor]
@@ -454,6 +454,7 @@ class RelayTUI:
                     "cli": self._action_pick_cli,
                     "launchd": self._action_toggle_launchd,
                     "logout": self._action_logout,
+                    "update_cli": self._action_update_cli,
                 }.get(key_name)
                 if handler:
                     handler()
@@ -498,12 +499,22 @@ class RelayTUI:
         """
         return ["home", "cli"]
 
+    def _provision_field_keys(self) -> list:
+        """Ordered list of focusable field keys on the Provision tab.
+
+        Provision is mostly read-only telemetry, but the MAINTENANCE
+        section offers an in-place CLI upgrade action.
+        """
+        return ["update_cli"]
+
     def _active_field_keys(self) -> list:
         """Field list for whichever tab the cursor is currently on."""
         if self._view == "connect":
             return self._connect_field_keys()
         if self._view == "runtime":
             return self._runtime_field_keys()
+        if self._view == "provision":
+            return self._provision_field_keys()
         return []
 
     def _action_edit_name(self, stdscr=None):
@@ -541,6 +552,70 @@ class RelayTUI:
             return
         self._on_logout()
         self._running = False
+
+    def _action_update_cli(self):
+        """Spawn `cerver update` in a background thread so the TUI
+        keeps redrawing while the upgrade runs. Output flows through
+        the relay's stdout (captured by LogCapture, visible in the
+        Logs tab); a short status surfaces inline on Provision."""
+        if self.state.get("cerver_update_state") == "running":
+            return  # already in flight — Enter is idempotent
+        self.state["cerver_update_state"] = "running"
+        self.state["cerver_update_last_msg"] = "Starting…"
+        import threading
+        threading.Thread(target=self._run_cerver_update, daemon=True).start()
+
+    def _run_cerver_update(self):
+        """Worker: locates the cerver binary (preferring the same path
+        the user actually invokes), runs `cerver update`, and reports
+        outcome via self.state so the Provision row updates on the next
+        draw tick."""
+        import subprocess
+        try:
+            cerver_bin = os.path.expanduser("~/.cerver/bin/cerver")
+            if not os.path.exists(cerver_bin):
+                resolved = shutil.which("cerver")
+                if resolved:
+                    cerver_bin = resolved
+                else:
+                    self.state["cerver_update_state"] = "failed"
+                    self.state["cerver_update_last_msg"] = "cerver binary not found on PATH"
+                    return
+            print(f"[update] running {cerver_bin} update")
+            proc = subprocess.run(
+                [cerver_bin, "update"],
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+            # Echo captured output into the relay log stream so the
+            # Logs tab shows the full transcript.
+            for line in (proc.stdout or "").splitlines():
+                print(f"[update] {line}")
+            for line in (proc.stderr or "").splitlines():
+                print(f"[update err] {line}")
+            if proc.returncode == 0:
+                self.state["cerver_update_state"] = "success"
+                # Pull last "Modified:" / "Installed:" line as the
+                # surface message so the user sees what's new.
+                summary = "Updated"
+                for line in reversed((proc.stdout or "").splitlines()):
+                    line = line.strip()
+                    if line.startswith("Installed:") or line.startswith("Modified:"):
+                        summary = line
+                        break
+                self.state["cerver_update_last_msg"] = summary[:80]
+            else:
+                self.state["cerver_update_state"] = "failed"
+                err = (proc.stderr or proc.stdout or "").strip().splitlines()
+                tail = err[-1] if err else f"exit {proc.returncode}"
+                self.state["cerver_update_last_msg"] = tail[:80]
+        except subprocess.TimeoutExpired:
+            self.state["cerver_update_state"] = "failed"
+            self.state["cerver_update_last_msg"] = "timed out after 180s"
+        except Exception as exc:  # noqa: BLE001
+            self.state["cerver_update_state"] = "failed"
+            self.state["cerver_update_last_msg"] = str(exc)[:80]
 
     def _focused_field_key(self) -> Optional[str]:
         """The symbolic key of the currently focused row on whichever
@@ -582,6 +657,11 @@ class RelayTUI:
             "Logout",
             "Signs out of this machine's cerver account and quits the relay.",
             "You'll need to run `cerver login` again to reconnect.",
+        ),
+        "update_cli": (
+            "Update CLI",
+            "Reinstalls the cerver CLI from the latest commit on main.",
+            "Output streams into the Logs tab; status surfaces here.",
         ),
     }
 
@@ -1156,6 +1236,38 @@ class RelayTUI:
                 self._put(stdscr, y, val_col + 2, "Not installed")
             y += 1
         y += 1
+
+        # MAINTENANCE — focusable action rows for cerver-side upkeep.
+        # First action: in-place upgrade of the local `cerver` CLI by
+        # spawning `cerver update` as a subprocess. Output streams into
+        # the relay's stdout (captured by LogCapture and visible on the
+        # Logs tab); a short status surfaces inline below.
+        self._put(stdscr, y, lbl_col, "MAINTENANCE", self._dim())
+        y += 1
+        self._hline(stdscr, y, col, bar_w)
+        y += 1
+
+        focused_update = self._focused_field_key() == "update_cli"
+        rev_update = curses.A_REVERSE if focused_update else 0
+        self._put(stdscr, y, lbl_col, "Update CLI", self._dim() | rev_update)
+        upd_state = s.get("cerver_update_state", "idle")
+        upd_msg = s.get("cerver_update_last_msg", "")
+        if upd_state == "running":
+            self._put(stdscr, y, val_col, "●", self._yellow() | self._bold() | rev_update)
+            self._put(stdscr, y, val_col + 2, "Updating…  (see Logs tab)", rev_update)
+        elif upd_state == "success":
+            self._put(stdscr, y, val_col, "●", self._green() | self._bold() | rev_update)
+            self._put(stdscr, y, val_col + 2, upd_msg or "Updated · Enter to re-run", rev_update)
+        elif upd_state == "failed":
+            self._put(stdscr, y, val_col, "●", self._red() | self._bold() | rev_update)
+            self._put(stdscr, y, val_col + 2, (upd_msg or "Failed")[: max(0, bar_w - val_col - 4)], rev_update)
+        else:
+            self._put(stdscr, y, val_col, "Press Enter to upgrade in place", self._dim() | rev_update)
+        y += 1
+
+        # About panel — explains the focused row when one is selected.
+        y += 1
+        y = self._draw_field_help(stdscr, y, col, bar_w)
 
         self._draw_tab_footer(stdscr, h, w, col, lbl_col, bar_w, current="provision")
 
