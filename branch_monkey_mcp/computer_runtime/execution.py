@@ -78,6 +78,16 @@ def process_provider_output_text(agent: Any, provider: Any, text: str) -> Option
     except json.JSONDecodeError:
         if provider.is_noise(text):
             return None
+        # Retain non-noise non-JSON lines (typically stderr after the
+        # merge in spawn_cli_subprocess) in the output buffer so the
+        # agent-end diagnostic can quote them in `last raw output:`.
+        # Without this, codex / claude / grok errors that emit on
+        # stderr are visible only via real-time listeners and lost by
+        # the time we try to explain a non-zero exit. With bufsize=1
+        # and a 1000-entry rolling cap, the bookkeeping cost is small.
+        agent.output_buffer.append({"data": text})
+        if len(agent.output_buffer) > 1000:
+            agent.output_buffer.pop(0)
         return {
             "type": "output",
             "data": text,
